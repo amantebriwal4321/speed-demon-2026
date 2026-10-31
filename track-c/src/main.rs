@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::hash::Hasher;
 use std::io::Write;
 
@@ -117,15 +117,12 @@ fn main() {
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
     const SLOTS: usize = 1 << 18; // the name pool is 100,000 per the spec
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
-    // the raw bytes of names up to 16 long sit next to the table, so a hit compares two
-    // words instead of reading the first occurrence back from somewhere in the file
-    let inl: Vec<[AtomicU64; 2]> = (0..SLOTS).map(|_| [AtomicU64::new(0), AtomicU64::new(0)]).collect();
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
-            let (lookup, table, seen, inl) = (&lookup, &table, &seen, &inl);
+            let (lookup, table, seen) = (&lookup, &table, &seen);
             sc.spawn(move || {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
@@ -156,34 +153,15 @@ fn main() {
                     let name = &c[ns..ne];
                     let h = fx(name);
                     let me = (h >> 48) << 48 | (name.len() as u64) << 32 | (ns as u64 + 1);
-                    let short = name.len() <= 16;
-                    let (w0, w1) = if short {
-                        let mut t = [0u8; 16];
-                        t[..name.len()].copy_from_slice(name);
-                        (u64::from_le_bytes(t[..8].try_into().unwrap()), u64::from_le_bytes(t[8..].try_into().unwrap()))
-                    } else { (0, 0) };
-                    const PENDING: u64 = 1; // a claimed slot whose inline bytes are not out yet
                     let mut j = h as usize & (SLOTS - 1);
                     loop {
-                        let mut cur = table[j].load(Acquire);
-                        if cur == 0 {
-                            match table[j].compare_exchange(0, PENDING, Acquire, Acquire) {
-                                Ok(_) => {
-                                    inl[j][0].store(w0, Relaxed); inl[j][1].store(w1, Relaxed);
-                                    table[j].store(me, Release);
-                                    break;
-                                }
-                                Err(v) => cur = v,
-                            }
-                        }
-                        while cur == PENDING { std::hint::spin_loop(); cur = table[j].load(Acquire); }
+                        let cur = table[j].load(Relaxed);
+                        let cur = if cur == 0 {
+                            match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) => v }
+                        } else { cur };
                         if cur >> 48 == me >> 48 && (cur >> 32 & 0xFFFF) == name.len() as u64 {
-                            if short {
-                                if inl[j][0].load(Relaxed) == w0 && inl[j][1].load(Relaxed) == w1 { break; }
-                            } else {
-                                let o = (cur & 0xFFFF_FFFF) as usize - 1;
-                                if &c[o..o + name.len()] == name { break; }
-                            }
+                            let o = (cur & 0xFFFF_FFFF) as usize - 1;
+                            if &c[o..o + name.len()] == name { break; }
                         }
                         j = (j + 1) & (SLOTS - 1);
                     }
