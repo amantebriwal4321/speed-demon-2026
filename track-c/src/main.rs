@@ -1,5 +1,5 @@
-use std::borrow::Cow;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::hash::Hasher;
 use std::io::Write;
 
 // small FxHash-style hasher, enough for byte strings we own
@@ -17,7 +17,6 @@ impl Hasher for Fx {
     fn write_u16(&mut self, x: u16) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
     fn write_usize(&mut self, x: usize) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
 }
-type FxMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
 
 fn fx(b: &[u8]) -> u64 { let mut h = Fx(0); h.write(b); h.finish() }
 
@@ -41,29 +40,25 @@ fn find(b: &[u8], c: u8) -> usize {
 
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
-// parse one text field at b[*i..]; returns (value, unescaped length) and leaves *i after the comma
-fn field<'a>(b: &'a [u8], i: &mut usize) -> (Cow<'a, [u8]>, u64) {
+// parse one text field at b[*i..]. Returns the raw bytes between the quotes (or the unquoted
+// bytes) and the unescaped length, and leaves *i after the comma. Unescaping is one to one
+// ("" <-> "), so two raw slices are equal exactly when their values are.
+fn field(b: &[u8], i: &mut usize) -> (usize, usize, u64) {
     if b[*i] == b'"' {
         let start = *i + 1;
         let mut j = start;
-        let mut esc = false;
+        let mut pairs = 0;
         loop {
             let q = j + find(&b[j..], b'"');
-            if q + 1 < b.len() && b[q + 1] == b'"' { esc = true; j = q + 2; continue; }
+            if b[q + 1] == b'"' { pairs += 1; j = q + 2; continue; }
             *i = q + 2; // closing quote and comma
-            let raw = &b[start..q];
-            if !esc { return (Cow::Borrowed(raw), raw.len() as u64); }
-            let mut v = Vec::with_capacity(raw.len());
-            let mut k = 0;
-            while k < raw.len() { v.push(raw[k]); if raw[k] == b'"' { k += 1; } k += 1; }
-            let l = v.len() as u64;
-            return (Cow::Owned(v), l);
+            return (start, q, (q - start - pairs) as u64);
         }
     }
     let start = *i;
     let e = start + find(&b[start..], b',');
     *i = e + 1;
-    (Cow::Borrowed(&b[start..e]), (e - start) as u64)
+    (start, e, (e - start) as u64)
 }
 
 fn main() {
@@ -108,23 +103,28 @@ fn main() {
     }
     cuts.push(body.len());
 
-    let results: Vec<(Vec<Agg>, Vec<Cow<[u8]>>, Vec<Vec<u64>>, Vec<Vec<u32>>)> = std::thread::scope(|sc| {
+    // one name table shared by all threads, filled with CAS. A slot is
+    // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
+    // The slot index is the name's id, and each country keeps an atomic bitset of ids.
+    const SLOTS: usize = 1 << 18; // the name pool is 100,000 per the spec
+    let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    let words = SLOTS / 64;
+    let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
+    let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
-            let c = &body[cuts[k]..cuts[k + 1]];
-            let lookup = &lookup;
+            let (lo, hi) = (cuts[k], cuts[k + 1]);
+            let (lookup, table, seen) = (&lookup, &table, &seen);
             sc.spawn(move || {
+                let c = body;
                 let mut agg = vec![Agg::new(); ng];
-                // names interned to local ids; one bitset of seen name ids per country
-                let mut ids: FxMap<Cow<[u8]>, u32> = FxMap::default();
-                let mut bits: Vec<Vec<u64>> = vec![Vec::new(); ng];
-                let mut i = 0;
-                while i < c.len() {
+                let mut i = lo;
+                while i < hi {
                     if c[i..].starts_with(BOM) { i += 3; }
                     let mut id = 0i64;
                     while c[i] != b',' { id = id * 10 + (c[i] - b'0') as i64; i += 1; }
                     i += 1;
-                    let (name, nl) = field(c, &mut i);
-                    let (_, tl) = field(c, &mut i);
+                    let (ns, ne, nl) = field(c, &mut i);
+                    let (_, _, tl) = field(c, &mut i);
                     let mut rid = 0usize;
                     while c[i] != b',' { rid = rid * 10 + (c[i] - b'0') as usize; i += 1; }
                     i += 1;
@@ -135,31 +135,37 @@ fn main() {
                     if c[i] == b'\r' { i += 1; }
                     i += 1;
                     if neg { a = -a; }
-                    let g = if rid < lookup.len() { lookup[rid] } else { unm };
-                    let x = &mut agg[g as usize];
+                    let g = if rid < lookup.len() { lookup[rid] } else { unm } as usize;
+                    let x = &mut agg[g];
                     x.count += 1; x.id_sum += id; x.sum += a;
                     if a < x.min { x.min = a; }
                     if a > x.max { x.max = a; }
                     x.name_bytes += nl; x.note_bytes += tl;
-                    let n = ids.len() as u32;
-                    let id = *ids.entry(name).or_insert(n) as usize;
-                    let bs = &mut bits[g as usize];
-                    if bs.len() <= id / 64 { bs.resize(id / 64 + 1, 0); }
-                    bs[id / 64] |= 1 << (id % 64);
+                    let name = &c[ns..ne];
+                    let h = fx(name);
+                    let me = (h >> 48) << 48 | (name.len() as u64) << 32 | (ns as u64 + 1);
+                    let mut j = h as usize & (SLOTS - 1);
+                    loop {
+                        let cur = table[j].load(Relaxed);
+                        let cur = if cur == 0 {
+                            match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) => v }
+                        } else { cur };
+                        if cur >> 48 == me >> 48 && (cur >> 32 & 0xFFFF) == name.len() as u64 {
+                            let o = (cur & 0xFFFF_FFFF) as usize - 1;
+                            if &c[o..o + name.len()] == name { break; }
+                        }
+                        j = (j + 1) & (SLOTS - 1);
+                    }
+                    seen[g * words + j / 64].fetch_or(1 << (j % 64), Relaxed);
                 }
-                let mut names = vec![Cow::Borrowed(&b""[..]); ids.len()];
-                for (k, v) in ids { names[v as usize] = k; }
-                // local ids bucketed by the merge shard that will own them
-                let mut bucket: Vec<Vec<u32>> = vec![Vec::new(); nt];
-                for (l, nm) in names.iter().enumerate() { bucket[fx(nm) as usize % nt].push(l as u32); }
-                (agg, names, bits, bucket)
+                agg
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     let mut total = vec![Agg::new(); ng];
-    for (a, _, _, _) in &results {
+    for a in &aggs {
         for g in 0..ng {
             let (t, x) = (&mut total[g], &a[g]);
             t.count += x.count; t.id_sum += x.id_sum; t.sum += x.sum;
@@ -167,55 +173,7 @@ fn main() {
             t.name_bytes += x.name_bytes; t.note_bytes += x.note_bytes;
         }
     }
-    // global name ids, built in nt shards by hash so the merge runs in parallel.
-    // global id = shard + nt * index inside the shard
-    let shards: Vec<Vec<Vec<u32>>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|s| {
-            let results = &results;
-            sc.spawn(move || {
-                let mut m: FxMap<&[u8], u32> = FxMap::default();
-                results.iter().map(|(_, names, _, bucket)| bucket[s].iter().map(|&l| {
-                    let n = m.len() as u32;
-                    s as u32 + nt as u32 * *m.entry(&names[l as usize][..]).or_insert(n)
-                }).collect()).collect()
-            })
-        }).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    // per part, local id -> global id
-    let gid: Vec<Vec<u32>> = (0..results.len()).map(|p| {
-        let mut g = vec![0u32; results[p].1.len()];
-        for s in 0..nt { for (&l, &x) in results[p].3[s].iter().zip(&shards[s][p]) { g[l as usize] = x; } }
-        g
-    }).collect();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let distinct: Vec<std::sync::atomic::AtomicU64> = (0..ng).map(|_| Default::default()).collect();
-    std::thread::scope(|sc| {
-        for _ in 0..nt {
-            sc.spawn(|| {
-                let mut seen: Vec<u64> = Vec::new();
-                loop {
-                    let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if g >= ng { break; }
-                    seen.clear();
-                    let mut c = 0;
-                    for (p, (_, _, bits, _)) in results.iter().enumerate() {
-                        for (w, &word) in bits[g].iter().enumerate() {
-                            let mut x = word;
-                            while x != 0 {
-                                let id = gid[p][w * 64 + x.trailing_zeros() as usize] as usize;
-                                x &= x - 1;
-                                if seen.len() <= id / 64 { seen.resize(id / 64 + 1, 0); }
-                                if seen[id / 64] & (1 << (id % 64)) == 0 { seen[id / 64] |= 1 << (id % 64); c += 1; }
-                            }
-                        }
-                    }
-                    distinct[g].store(c, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-        }
-    });
-    let distinct: Vec<u64> = distinct.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
+    let distinct: Vec<u64> = (0..ng).map(|g| seen[g * words..(g + 1) * words].iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()).collect();
 
     let money = |v: i64| format!("{}{}.{:02}", if v < 0 { "-" } else { "" }, v.abs() / 100, v.abs() % 100);
     let mut o = Vec::new();
