@@ -76,7 +76,7 @@ fn main() {
 
     // regions: region_id -> country index, countries numbered in sorted order, _UNMATCHED last.
     // A code [A-Z]{3} is a number below 26^3, so counting the codes in numeric order sorts them.
-    let r = std::fs::read(format!("{data}/regions.csv")).unwrap();
+    let r = map(&format!("{data}/regions.csv"));
     let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
     let mut raw: Vec<u16> = Vec::new(); // region_id -> code, u16::MAX if absent
     while i < r.len() {
@@ -115,7 +115,7 @@ fn main() {
     // one name table shared by all threads, filled with CAS. A slot is
     // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
-    const SLOTS: usize = 1 << 18; // the name pool is 100,000 per the spec
+    const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();

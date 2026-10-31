@@ -39,6 +39,13 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Names are now told apart by a 64 bit hash of their bytes and length, and the table stores only that. With 100,000 names the odds of a collision are about 1 in 10^9. 0.090 s to 0.080 s, memory flat at 20 MB (run-a90ced93ea29).
 - Tried and reverted: a full rewrite on quote, comma and LF bitmasks with prefix xor. Correct, but 0.114 s on the board (run-8e622a5ce441).
 
+## Round 6
+
+- Memory was the cheaper lever: the run is within a few ms of the same time locally either way, but anonymous memory went from 16 MB to 9 MB.
+- The name table went from 2^18 to 2^17 slots (100,000 names, so under 0.77 full). That halves the table and the per country seen bitsets, 8 MB down to 4 MB.
+- regions.csv is mapped like records.csv instead of read into a 2 MB heap buffer.
+- Found a stuck local test run from an earlier session using 7 of 8 cores, which had made the local timings of the last rounds noisy. It's killed.
+
 ## Next ideas
 
 The per country bitsets of names seen are the next cost: one atomic OR per record into 8 MB.
