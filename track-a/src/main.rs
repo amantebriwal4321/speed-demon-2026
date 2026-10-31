@@ -37,26 +37,43 @@ fn d2(b: &[u8]) -> usize { ((b[0] - b'0') * 10 + (b[1] - b'0')) as usize }
 // per-thread state: endpoint -> local id, and per hour a flat list of
 // (local id << 33 | latency << 1 | is_5xx). Sorting one hour's list later groups it by
 // endpoint and sorts each group's latencies in the same pass.
-struct Part<'a> { ids: FxMap<&'a [u8], u32>, eps: Vec<&'a [u8]>, rows: Vec<Vec<u64>> }
+struct Part { ids: FxMap<Box<[u8]>, u32>, eps: Vec<Box<[u8]>>, rows: Vec<Vec<u64>> }
 
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    let b = map(&format!("{data}/requests.log"));
+    // pread into a small per thread buffer instead of an mmap: no page faults, and the
+    // buffer is reused, so the input never shows up as our memory
+    let file = std::fs::File::open(format!("{data}/requests.log")).unwrap();
+    let flen = file.metadata().unwrap().len() as usize;
+    use std::os::unix::fs::FileExt;
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let mut cuts = vec![0usize];
     for k in 1..nt {
-        let mut p = (b.len() * k / nt).max(*cuts.last().unwrap());
-        while p < b.len() && p > 0 && b[p - 1] != b'\n' { p += 1; }
-        cuts.push(p);
+        // start of the first line at or after the even split point
+        let mut p = (flen * k / nt).max(*cuts.last().unwrap());
+        if p > 0 && p < flen {
+            let mut t = [0u8; 256];
+            let r = file.read_at(&mut t, (p - 1) as u64).unwrap();
+            p += t[..r].iter().position(|&x| x == b'\n').unwrap();
+        }
+        cuts.push(p.min(flen));
     }
-    cuts.push(b.len());
+    cuts.push(flen);
 
     let mut parts: Vec<Part> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
-            let c = &b[cuts[k]..cuts[k + 1]];
+            let (lo, hi, file) = (cuts[k], cuts[k + 1], &file);
             sc.spawn(move || {
-                let mut p = Part { ids: FxMap::default(), eps: Vec::new(), rows: vec![Vec::with_capacity(c.len() / 77 / HOURS + 64); HOURS] };
+                let mut p = Part { ids: FxMap::default(), eps: Vec::new(), rows: vec![Vec::with_capacity((hi - lo) / 77 / HOURS + 64); HOURS] };
+                const CH: usize = 1 << 19;
+                let mut buf = vec![0u8; CH + 4096];
+                let (mut pos, mut have) = (lo, 0usize);
+                while pos < hi || have > 0 {
+                let r = file.read_at(&mut buf[have..have + CH.min(hi - pos)], pos as u64).unwrap();
+                pos += r; have += r;
+                let end = if pos >= hi { have } else { buf[..have].iter().rposition(|&x| x == b'\n').unwrap() + 1 };
+                let c = &buf[..end];
                 let mut i = 0;
                 while i < c.len() {
                     let ts = &c[i..i + 27];
@@ -76,9 +93,10 @@ fn main() {
                     let ep = &c[es..k - 4];
                     i = nl + 1;
                     let n = p.ids.len() as u32;
-                    let id = *p.ids.entry(ep).or_insert_with(|| n);
-                    if id == n { p.eps.push(ep); }
+                    let id = match p.ids.get(ep) { Some(&x) => x, None => { p.ids.insert(ep.into(), n); p.eps.push(ep.into()); n } };
                     p.rows[hour].push((id as u64) << 33 | (v as u64) << 1 | five as u64);
+                }
+                buf.copy_within(end..have, 0); have -= end;
                 }
                 p
             })
@@ -87,10 +105,11 @@ fn main() {
     });
 
     // global endpoint order is plain byte order, which is what Vec<&[u8]>::sort gives
-    let mut all: Vec<&[u8]> = parts.iter().flat_map(|p| p.eps.iter().copied()).collect();
+    let eps: Vec<Vec<Box<[u8]>>> = parts.iter_mut().map(|p| std::mem::take(&mut p.eps)).collect();
+    let mut all: Vec<&[u8]> = eps.iter().flat_map(|p| p.iter().map(|e| &e[..])).collect();
     all.sort_unstable(); all.dedup();
     // local id -> global id, per part
-    let maps: Vec<Vec<u32>> = parts.iter().map(|p| p.eps.iter().map(|e| all.binary_search(e).unwrap() as u32).collect()).collect();
+    let maps: Vec<Vec<u32>> = eps.iter().map(|p| p.iter().map(|e| all.binary_search(&&e[..]).unwrap() as u32).collect()).collect();
     // hour major ownership of the rows, so each hour's rows are freed as soon as it is done
     let hour_rows: Vec<std::sync::Mutex<Vec<Vec<u64>>>> = {
         let mut v: Vec<Vec<Vec<u64>>> = (0..HOURS).map(|_| Vec::new()).collect();
@@ -143,13 +162,3 @@ fn main() {
     std::process::exit(0);
 }
 
-// read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
-fn map(path: &str) -> &'static [u8] {
-    use std::os::unix::io::AsRawFd;
-    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
-    let f = std::fs::File::open(path).unwrap();
-    let len = f.metadata().unwrap().len() as usize;
-    if len == 0 { return &[]; }
-    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
-    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
-}
