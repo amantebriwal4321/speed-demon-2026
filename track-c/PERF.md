@@ -11,6 +11,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 4 | one shared name table filled with CAS, keyed by raw slices, atomic per country bitsets | run-16dc8dca7b0a | 0.098 | 20 | 63.02 |
 | 5 | tried a name arena (run-54f93b57d220, 0.097 s but 44 MB, 59.64 points), reverted | run-d49a0459162a | 0.098 | 20 | 63.09 |
 | 6 | SSE2 quote and comma scan, 16 bytes per step | run-5e77f9bfa29a | 0.090 | 20 | 63.96 |
+| 7 | names told apart by a 64 bit hash, no compare against the file | run-a90ced93ea29 | 0.080 | 20 | 65.03 |
 
 ## Step 1: why it got faster
 
@@ -32,6 +33,12 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - The field scans now use SSE2 compares and a movemask, 16 bytes per step, with the SWAR loop kept for the tail.
 - Tried and dropped: keeping the bytes of short names next to the hash table so a hit never reads back into the file (run-6e59e72f42c5). 0.085 s, but 28 MB instead of 20 MB, and memory costs more points than that time gains.
 
+## Round 5
+
+- Taking out pieces one at a time showed the name table was about 30% of the run. A hit had to compare the name against its first copy, which sits somewhere random in the 200 MB file, so nearly every record paid a cache miss.
+- Names are now told apart by a 64 bit hash of their bytes and length, and the table stores only that. With 100,000 names the odds of a collision are about 1 in 10^9. 0.090 s to 0.080 s, memory flat at 20 MB (run-a90ced93ea29).
+- Tried and reverted: a full rewrite on quote, comma and LF bitmasks with prefix xor. Correct, but 0.114 s on the board (run-8e622a5ce441).
+
 ## Next ideas
 
-A SIMD field scanner, since parsing is most of what is left.
+The per country bitsets of names seen are the next cost: one atomic OR per record into 8 MB.

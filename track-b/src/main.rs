@@ -50,6 +50,8 @@ fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u32]) {
     for &d in x.iter().take(10 - r.len()) { r.push(d); }
 }
 
+const BLK: usize = 1 << 20; // pairs per block, each block sized up front so it never grows
+
 struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, doff: Vec<u32> }
 
 enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<u128>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
@@ -217,7 +219,7 @@ fn main() {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
                 let mut cnt = vec![0u32; nall + 1];
-                let (mut blocks, mut blk) = (Vec::new(), Vec::<u32>::new());
+                let (mut blocks, mut blk) = (Vec::new(), Vec::<u32>::with_capacity(BLK + 4096));
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
@@ -226,7 +228,7 @@ fn main() {
                     if p.lo == u32::MAX { p.lo = doc; }
                     // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
                     // the fill below can free each block as it goes and the peak stays low
-                    if blk.len() >= 1 << 20 { blocks.push(std::mem::take(&mut blk)); }
+                    if blk.len() >= BLK { blocks.push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096))); }
                     blk.push(u32::MAX);
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
