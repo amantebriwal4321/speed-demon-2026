@@ -33,7 +33,8 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Round 5
 
 - Profile on 8 threads: parse 22 ms, endpoint ids 4 ms, hours and output 11 ms. The board's memory is anonymous memory plus the 10 MB summary.txt in the page cache, so freeing rows while the output grows counts.
-- glibc kept every 16 KB row block in its thread arenas. With M_MMAP_THRESHOLD just under 16 KB each block is its own mapping, and each hour's blocks are dropped as soon as the hour is done. The local anonymous peak went from 25 MB to 17 MB.
+- glibc kept every 16 KB row block in its thread arenas. With M_MMAP_THRESHOLD just under 16 KB each block is its own mapping, and each hour's blocks are dropped as soon as the hour is done. The local anonymous peak went from 25 MB to 17 MB. Board: 0.0465 s, 23 MB (from 33), 74.30 points, a new best, rank 49 to 47 of 106 (run-9039a2342ca7).
+- Tried and dropped: MADV_POPULATE_READ on each thread's range before parsing. About 10 ms slower locally.
 
 ## Next ideas
 
