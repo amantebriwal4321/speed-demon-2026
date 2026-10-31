@@ -151,6 +151,10 @@ fn main() {
     let mut vals = vec![0u32; cap];
     let h = |k: u128| (((k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)) >> (shift - 64)) as usize;
     let mut long: FxMap<&[u8], u32> = FxMap::default();
+    // a 128 KB bitmap of query term hashes, so most tokens no query uses stop in L2
+    const FBITS: usize = 1 << 20;
+    let mut filt = vec![0u64; FBITS / 64];
+    let hm = |k: u128| (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     for (t, &id) in &ids {
         if t.len() > 16 { long.insert(t, id); continue; }
         let mut k = 0u128;
@@ -158,6 +162,8 @@ fn main() {
         let mut i = h(k);
         while keys[i] != 0 { i = (i + 1) & (cap - 1); }
         keys[i] = k; vals[i] = id;
+        let fb = (hm(k) >> 20) as usize & (FBITS - 1);
+        filt[fb >> 6] |= 1 << (fb & 63);
     }
 
     let lookup = |t: &[u8]| -> Option<u32> {
@@ -166,6 +172,7 @@ fn main() {
         let mut j = h(k);
         loop { let x = keys[j]; if x == k { return Some(vals[j]); } if x == 0 { return None; } j = (j + 1) & (cap - 1); }
     };
+    //MARK
     let docs = map(&format!("{data}/docs.txt"));
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let mut cuts = vec![0usize];
@@ -187,7 +194,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, h) = (&keys, &vals, &long, &lower, &h);
+            let (keys, vals, long, lower, filt) = (&keys, &vals, &long, &lower, &filt);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), stream: Vec::with_capacity(c.len() / 6), start: Vec::new(), extra: Vec::new(), xstart: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nterm];
@@ -218,8 +225,10 @@ fn main() {
                         let l = i - s;
                         let id = if l <= 16 {
                             let k = pack(&docs[base + s..], l);
-                            let mut j = h(k);
-                            loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
+                            let m = hm(k);
+                            let fb = (m >> 20) as usize & (FBITS - 1);
+                            let mut j = (m >> (shift - 64)) as usize;
+                            if filt[fb >> 6] >> (fb & 63) & 1 == 0 { None } else { loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); } }
                         } else if l <= 32 {
                             let mut t = [0u8; 32];
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
