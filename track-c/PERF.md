@@ -44,7 +44,13 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Memory was the cheaper lever: the run is within a few ms of the same time locally either way, but anonymous memory went from 16 MB to 9 MB.
 - The name table went from 2^18 to 2^17 slots (100,000 names, so under 0.77 full). That halves the table and the per country seen bitsets, 8 MB down to 4 MB.
 - regions.csv is mapped like records.csv instead of read into a 2 MB heap buffer.
+- Board: 0.0757 s, 13 MB, 67.67 points, rank 55 to 45 of 88 (run-0278becede36).
 - Found a stuck local test run from an earlier session using 7 of 8 cores, which had made the local timings of the last rounds noisy. It's killed.
+
+## Round 7
+
+- The name insert now runs one record late. Each record hashes its name and prefetches its table slot and seen word, then does the insert for the record before it, so those two cache misses overlap the parse of the next record. Local CPU time went from 0.37 s to 0.28 s.
+- Tried and dropped: keeping 2, 4 or 8 records in flight. No better than 1 locally.
 
 ## Next ideas
 

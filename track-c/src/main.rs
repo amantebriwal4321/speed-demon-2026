@@ -115,7 +115,6 @@ fn main() {
     // one name table shared by all threads, filled with CAS. A slot is
     // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
-    const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
@@ -127,6 +126,7 @@ fn main() {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
                 let mut i = lo;
+                let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
                 while i < hi {
                     if c[i..].starts_with(BOM) { i += 3; }
                     let mut id = 0i64;
@@ -155,15 +155,18 @@ fn main() {
                     // names are told apart by a 64 bit hash of their bytes and length; with
                     // 100,000 names a collision has odds near 1 in 10^9
                     let me = ((h ^ name.len() as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
-                    let mut j = h as usize & (SLOTS - 1);
-                    loop {
-                        let cur = table[j].load(Relaxed);
-                        if cur == me { break; }
-                        if cur == 0 { match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) if v == me => break, Err(_) => {} } }
-                        j = (j + 1) & (SLOTS - 1);
+                    let j0 = h as usize & (SLOTS - 1);
+                    // prefetch this record's slot and seen word, then insert the previous record,
+                    // so the two cache misses overlap the parse of the next record
+                    unsafe {
+                        use std::arch::x86_64::*;
+                        _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
+                        _mm_prefetch(seen.as_ptr().add(g * words + j0 / 64) as *const i8, _MM_HINT_T0);
                     }
-                    seen[g * words + j / 64].fetch_or(1 << (j % 64), Relaxed);
+                    if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
+                    pg = g; pme = me; pj = j0;
                 }
+                if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
                 agg
             })
         }).collect();
@@ -203,4 +206,18 @@ fn map(path: &str) -> &'static [u8] {
     if len == 0 { return &[]; }
     let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+}
+
+const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
+const WORDS: usize = SLOTS / 64;
+
+#[inline(always)]
+fn insert(table: &[AtomicU64], seen: &[AtomicU64], g: usize, me: u64, mut j: usize) {
+    loop {
+        let cur = table[j].load(Relaxed);
+        if cur == me { break; }
+        if cur == 0 { match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) if v == me => break, Err(_) => {} } }
+        j = (j + 1) & (SLOTS - 1);
+    }
+    seen[g * WORDS + j / 64].fetch_or(1 << (j % 64), Relaxed);
 }
