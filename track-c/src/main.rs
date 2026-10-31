@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 
@@ -18,7 +17,9 @@ impl Hasher for Fx {
     fn write_u16(&mut self, x: u16) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
     fn write_usize(&mut self, x: usize) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
 }
-type FxSet<T> = HashSet<T, BuildHasherDefault<Fx>>;
+type FxMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
+
+fn fx(b: &[u8]) -> u64 { let mut h = Fx(0); h.write(b); h.finish() }
 
 #[derive(Clone, Copy)]
 struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
@@ -73,7 +74,7 @@ fn main() {
     for (id, c) in &pairs { lookup[*id as usize] = names.binary_search(c).unwrap() as u16; }
     let ng = names.len() + 1;
 
-    let b = std::fs::read(format!("{data}/records.csv")).unwrap();
+    let b = map(&format!("{data}/records.csv"));
     let mut p = 0;
     if b.starts_with(BOM) { p = 3; }
     p += b[p..].iter().position(|&c| c == b'\n').unwrap() + 1;
@@ -88,13 +89,15 @@ fn main() {
     }
     cuts.push(body.len());
 
-    let results: Vec<(Vec<Agg>, FxSet<(u16, Cow<[u8]>)>)> = std::thread::scope(|sc| {
+    let results: Vec<(Vec<Agg>, Vec<Cow<[u8]>>, Vec<Vec<u64>>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &body[cuts[k]..cuts[k + 1]];
             let lookup = &lookup;
             sc.spawn(move || {
                 let mut agg = vec![Agg::new(); ng];
-                let mut set: FxSet<(u16, Cow<[u8]>)> = FxSet::default();
+                // names interned to local ids; one bitset of seen name ids per country
+                let mut ids: FxMap<Cow<[u8]>, u32> = FxMap::default();
+                let mut bits: Vec<Vec<u64>> = vec![Vec::new(); ng];
                 let mut i = 0;
                 while i < c.len() {
                     if c[i..].starts_with(BOM) { i += 3; }
@@ -119,29 +122,77 @@ fn main() {
                     if a < x.min { x.min = a; }
                     if a > x.max { x.max = a; }
                     x.name_bytes += nl; x.note_bytes += tl;
-                    set.insert((g, name));
+                    let n = ids.len() as u32;
+                    let id = *ids.entry(name).or_insert(n) as usize;
+                    let bs = &mut bits[g as usize];
+                    if bs.len() <= id / 64 { bs.resize(id / 64 + 1, 0); }
+                    bs[id / 64] |= 1 << (id % 64);
                 }
-                (agg, set)
+                let mut names = vec![Cow::Borrowed(&b""[..]); ids.len()];
+                for (k, v) in ids { names[v as usize] = k; }
+                (agg, names, bits)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     let mut total = vec![Agg::new(); ng];
-    let mut it = results.into_iter();
-    let (a0, mut set) = it.next().unwrap();
-    total.copy_from_slice(&a0);
-    for (a, s) in it {
+    for (a, _, _) in &results {
         for g in 0..ng {
             let (t, x) = (&mut total[g], &a[g]);
             t.count += x.count; t.id_sum += x.id_sum; t.sum += x.sum;
             t.min = t.min.min(x.min); t.max = t.max.max(x.max);
             t.name_bytes += x.name_bytes; t.note_bytes += x.note_bytes;
         }
-        set.extend(s);
     }
-    let mut distinct = vec![0u64; ng];
-    for (g, _) in &set { distinct[*g as usize] += 1; }
+    // global name ids, built in nt shards by hash so the merge runs in parallel.
+    // global id = shard + nt * index inside the shard
+    let shards: Vec<Vec<Vec<u32>>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|s| {
+            let results = &results;
+            sc.spawn(move || {
+                let mut m: FxMap<&[u8], u32> = FxMap::default();
+                results.iter().map(|(_, names, _)| names.iter().map(|nm| {
+                    if fx(nm) as usize % nt != s { return u32::MAX; }
+                    let n = m.len() as u32;
+                    s as u32 + nt as u32 * *m.entry(&nm[..]).or_insert(n)
+                }).collect()).collect()
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    // per part, local id -> global id
+    let gid: Vec<Vec<u32>> = (0..results.len()).map(|p| {
+        (0..results[p].1.len()).map(|l| (0..nt).map(|s| shards[s][p][l]).find(|&x| x != u32::MAX).unwrap()).collect()
+    }).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let distinct: Vec<std::sync::atomic::AtomicU64> = (0..ng).map(|_| Default::default()).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..nt {
+            sc.spawn(|| {
+                let mut seen: Vec<u64> = Vec::new();
+                loop {
+                    let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if g >= ng { break; }
+                    seen.clear();
+                    let mut c = 0;
+                    for (p, (_, _, bits)) in results.iter().enumerate() {
+                        for (w, &word) in bits[g].iter().enumerate() {
+                            let mut x = word;
+                            while x != 0 {
+                                let id = gid[p][w * 64 + x.trailing_zeros() as usize] as usize;
+                                x &= x - 1;
+                                if seen.len() <= id / 64 { seen.resize(id / 64 + 1, 0); }
+                                if seen[id / 64] & (1 << (id % 64)) == 0 { seen[id / 64] |= 1 << (id % 64); c += 1; }
+                            }
+                        }
+                    }
+                    distinct[g].store(c, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    let distinct: Vec<u64> = distinct.iter().map(|x| x.load(std::sync::atomic::Ordering::Relaxed)).collect();
 
     let money = |v: i64| format!("{}{}.{:02}", if v < 0 { "-" } else { "" }, v.abs() / 100, v.abs() % 100);
     let mut o = Vec::new();
@@ -153,4 +204,16 @@ fn main() {
     }
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/aggregates.txt"), o).unwrap();
+    std::process::exit(0);
+}
+
+// read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
+fn map(path: &str) -> &'static [u8] {
+    use std::os::unix::io::AsRawFd;
+    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+    let f = std::fs::File::open(path).unwrap();
+    let len = f.metadata().unwrap().len() as usize;
+    if len == 0 { return &[]; }
+    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
 }

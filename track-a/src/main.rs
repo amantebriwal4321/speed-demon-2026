@@ -20,6 +20,18 @@ type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
 const HOURS: usize = 72; // 2026-10-30T18 .. 2026-11-02T17
 
+// index of the first LF, eight bytes at a time
+fn newline(b: &[u8]) -> usize {
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let x = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) ^ 0x0a0a0a0a0a0a0a0a;
+        let z = x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080;
+        if z != 0 { return i + (z.trailing_zeros() / 8) as usize; }
+        i += 8;
+    }
+    i + b[i..].iter().position(|&x| x == b'\n').unwrap()
+}
+
 fn d2(b: &[u8]) -> usize { ((b[0] - b'0') * 10 + (b[1] - b'0')) as usize }
 
 // per-thread state: endpoint -> local id, and for every (local id, hour) its latencies and 5xx count
@@ -28,7 +40,7 @@ struct Part<'a> { ids: FxMap<&'a [u8], u32>, eps: Vec<&'a [u8]>, lat: Vec<Vec<u3
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    let b = std::fs::read(format!("{data}/requests.log")).unwrap();
+    let b = map(&format!("{data}/requests.log"));
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let mut cuts = vec![0usize];
     for k in 1..nt {
@@ -49,17 +61,18 @@ fn main() {
                     // day offset from 2026-10-30: Oct 30 -> 0, Oct 31 -> 1, Nov 1 -> 2, Nov 2 -> 3
                     let day = if ts[6] == b'0' { d2(&ts[8..]) - 30 } else { d2(&ts[8..]) + 1 };
                     let hour = day * 24 + d2(&ts[11..]) - 18;
-                    let mut j = i + 28;
-                    while c[j] != b' ' { j += 1; } // method
-                    j += 1;
-                    let es = j;
-                    while c[j] != b' ' { j += 1; }
-                    let ep = &c[es..j];
-                    let five = c[j + 1] == b'5';
-                    j += 5;
+                    // method length from its first two bytes: GET PUT POST PATCH DELETE HEAD OPTIONS
+                    let ml = match (c[i + 28], c[i + 29]) { (b'G', _) | (b'P', b'U') => 3, (b'P', b'O') | (b'H', _) => 4, (b'P', _) => 5, (b'D', _) => 6, _ => 7 };
+                    let es = i + 29 + ml;
+                    let nl = es + newline(&c[es..]);
+                    // walk back over the latency digits; the status is the 3 bytes before them
+                    let mut k = nl - 1;
                     let mut v = 0u32;
-                    while c[j] != b'\n' { v = v * 10 + (c[j] - b'0') as u32; j += 1; }
-                    i = j + 1;
+                    let mut mul = 1u32;
+                    while c[k] != b' ' { v += (c[k] - b'0') as u32 * mul; mul = mul.wrapping_mul(10); k -= 1; }
+                    let five = c[k - 3] == b'5';
+                    let ep = &c[es..k - 4];
+                    i = nl + 1;
                     let n = p.ids.len() as u32;
                     let id = *p.ids.entry(ep).or_insert_with(|| n);
                     if id == n {
@@ -124,5 +137,18 @@ fn main() {
         slots.into_iter().map(|m| m.into_inner().unwrap()).collect()
     };
     std::fs::create_dir_all(&out).ok();
-    std::fs::write(format!("{out}/summary.txt"), lines.concat()).unwrap();
+    let mut f = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
+    for l in &lines { f.write_all(l).unwrap(); }
+    std::process::exit(0);
+}
+
+// read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
+fn map(path: &str) -> &'static [u8] {
+    use std::os::unix::io::AsRawFd;
+    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+    let f = std::fs::File::open(path).unwrap();
+    let len = f.metadata().unwrap().len() as usize;
+    if len == 0 { return &[]; }
+    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
 }
