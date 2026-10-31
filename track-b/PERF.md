@@ -52,6 +52,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Tried and dropped: terms found in more than 1 doc in 16 within the first 1024 docs going straight into a local bitset instead of the pair blocks. The peak went from 186 MB to 157 MB, but the run was 7% slower and the code longer. With the board's weights (T^0.5, M^0.2, S^0.15) that comes out slightly negative.
 - Tried and dropped: filling the dense term bitsets straight from the blocks. The peak is in the blocks, not the lists, so memory didn't move.
 
+## Round 6
+
+- A 32 KB filter of query term hashes sits in front of the 4 MB term table, so a token that can't be a query term skips the prefetch and the probe. Locally that's about 2% faster. An earlier 128 KB term bitmap came out in 9007210, and this one is a quarter of the size.
+
 ## Next ideas
 
 Tokenizing is the largest piece again, then the phrase checks.

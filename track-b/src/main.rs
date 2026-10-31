@@ -187,6 +187,7 @@ fn main() {
     let mut vals = vec![0u32; cap];
     let h = |k: u128| (((k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)) >> (shift - 64)) as usize;
     let mut long: FxMap<&[u8], u32> = FxMap::default();
+    let mut tf = vec![0u64; 1 << 12]; // 32 KB filter of term hashes, so most other tokens skip the 4 MB table
     let hm = |k: u128| (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     for (t, &id) in &ids {
         if t.len() > 16 { long.insert(t, id); continue; }
@@ -195,6 +196,7 @@ fn main() {
         let mut i = h(k);
         while keys[i] != 0 { i = (i + 1) & (cap - 1); }
         keys[i] = k; vals[i] = id;
+        let f = hm(k) as usize >> 46; tf[f >> 6] |= 1 << (f & 63);
     }
 
     let docs = map(&format!("{data}/docs.txt"));
@@ -218,7 +220,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, bk, bv, pf) = (&keys, &vals, &long, &lower, &bk, &bv, &pf);
+            let (keys, vals, long, lower, bk, bv, pf, tf) = (&keys, &vals, &long, &lower, &bk, &bv, &pf, &tf);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
@@ -276,9 +278,13 @@ fn main() {
                         // table miss overlaps the scan of the next token
                         let nx: (u8, u128, usize, Option<u32>) = if l <= 16 {
                             let k = pack(&docs[base + s..], l);
-                            let j = (hm(k) >> (shift - 64)) as usize;
-                            unsafe { std::arch::x86_64::_mm_prefetch(keys.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
-                            (1, k, j, None)
+                            let m = hm(k);
+                            let f = m as usize >> 46;
+                            if tf[f >> 6] >> (f & 63) & 1 == 0 { (2, 0, 0, None) } else {
+                                let j = (m >> (shift - 64)) as usize;
+                                unsafe { std::arch::x86_64::_mm_prefetch(keys.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
+                                (1, k, j, None)
+                            }
                         } else if l <= 32 {
                             let mut t = [0u8; 32];
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
