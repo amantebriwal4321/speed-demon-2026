@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::hash::Hasher;
 use std::io::Write;
 
@@ -104,19 +104,16 @@ fn main() {
     cuts.push(body.len());
 
     // one name table shared by all threads, filled with CAS. A slot is
-    // tag << 48 | len << 32 | (offset + 1), where offset and len point into a small arena that
-    // holds one copy of each distinct name, so the compare stays in cache.
+    // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
     const SLOTS: usize = 1 << 18; // the name pool is 100,000 per the spec
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let words = SLOTS / 64;
-    let arena: Vec<AtomicU64> = (0..(1 << 19)).map(|_| AtomicU64::new(0)).collect(); // 4 MB of name bytes, as words
-    let bump = AtomicU64::new(0);
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
-            let (lookup, table, seen, arena, bump) = (&lookup, &table, &seen, &arena, &bump);
+            let (lookup, table, seen) = (&lookup, &table, &seen);
             sc.spawn(move || {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
@@ -146,21 +143,17 @@ fn main() {
                     x.name_bytes += nl; x.note_bytes += tl;
                     let name = &c[ns..ne];
                     let h = fx(name);
-                    let tag = h >> 48 << 48 | (name.len() as u64) << 32;
-                    let words_of = |o: usize, l: usize| (o..o + (l + 7) / 8).map(|w| arena[w].load(Acquire));
-                    let mine = || name.chunks(8).map(|ch| { let mut x = [0u8; 8]; x[..ch.len()].copy_from_slice(ch); u64::from_le_bytes(x) });
+                    let me = (h >> 48) << 48 | (name.len() as u64) << 32 | (ns as u64 + 1);
                     let mut j = h as usize & (SLOTS - 1);
-                    let mut mine_at = usize::MAX; // arena offset once this thread has copied the name in
                     loop {
-                        let mut cur = table[j].load(Acquire);
-                        if cur == 0 {
-                            if mine_at == usize::MAX {
-                                mine_at = bump.fetch_add((name.len() as u64 + 7) / 8, Relaxed) as usize;
-                                for (w, x) in mine().enumerate() { arena[mine_at + w].store(x, Relaxed); }
-                            }
-                            match table[j].compare_exchange(0, tag | (mine_at as u64 + 1), Release, Acquire) { Ok(_) => break, Err(v) => cur = v }
+                        let cur = table[j].load(Relaxed);
+                        let cur = if cur == 0 {
+                            match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) => v }
+                        } else { cur };
+                        if cur >> 48 == me >> 48 && (cur >> 32 & 0xFFFF) == name.len() as u64 {
+                            let o = (cur & 0xFFFF_FFFF) as usize - 1;
+                            if &c[o..o + name.len()] == name { break; }
                         }
-                        if cur & !0xFFFF_FFFF == tag && words_of((cur & 0xFFFF_FFFF) as usize - 1, name.len()).eq(mine()) { break; }
                         j = (j + 1) & (SLOTS - 1);
                     }
                     seen[g * words + j / 64].fetch_or(1 << (j % 64), Relaxed);
