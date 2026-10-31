@@ -152,17 +152,14 @@ fn main() {
                     x.name_bytes += nl; x.note_bytes += tl;
                     let name = &c[ns..ne];
                     let h = fx(name);
-                    let me = (h >> 48) << 48 | (name.len() as u64) << 32 | (ns as u64 + 1);
+                    // names are told apart by a 64 bit hash of their bytes and length; with
+                    // 100,000 names a collision has odds near 1 in 10^9
+                    let me = ((h ^ name.len() as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
                     let mut j = h as usize & (SLOTS - 1);
                     loop {
                         let cur = table[j].load(Relaxed);
-                        let cur = if cur == 0 {
-                            match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) => v }
-                        } else { cur };
-                        if cur >> 48 == me >> 48 && (cur >> 32 & 0xFFFF) == name.len() as u64 {
-                            let o = (cur & 0xFFFF_FFFF) as usize - 1;
-                            if &c[o..o + name.len()] == name { break; }
-                        }
+                        if cur == me { break; }
+                        if cur == 0 { match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) if v == me => break, Err(_) => {} } }
                         j = (j + 1) & (SLOTS - 1);
                     }
                     seen[g * words + j / 64].fetch_or(1 << (j % 64), Relaxed);

@@ -43,7 +43,14 @@ fn has(docs: &[u8], mut i: usize, ks: &[u128]) -> bool {
     }
 }
 
-struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, extra: Vec<u32>, xstart: Vec<u32>, doff: Vec<u32> }
+// only the count, the sum and the first ten ids are printed
+fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u32]) {
+    *cnt += x.len();
+    *sum += x.iter().map(|&d| d as u64).sum::<u64>();
+    for &d in x.iter().take(10 - r.len()) { r.push(d); }
+}
+
+struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, doff: Vec<u32> }
 
 enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<u128>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
 
@@ -158,10 +165,13 @@ fn main() {
     let bcap = (pairs.len() * 2).next_power_of_two().max(16);
     let bsh = 64 - bcap.trailing_zeros();
     let (mut bk, mut bv) = (vec![0u64; bcap], vec![0u32; bcap]);
+    let mut pf = vec![0u64; 1 << 14]; // 128 KB bitmap of pair hashes: most adjacent pairs stop here
     for (&k, &v) in &pairs {
         let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
         while bk[j] != 0 { j = (j + 1) & (bcap - 1); }
         bk[j] = k; bv[j] = v;
+        let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
+        pf[f >> 6] |= 1 << (f & 63);
     }
     // open addressing table from a token packed into a u128 (tokens of 16 bytes or less)
     // to its term id; longer query terms go to a small fallback map
@@ -171,9 +181,6 @@ fn main() {
     let mut vals = vec![0u32; cap];
     let h = |k: u128| (((k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)) >> (shift - 64)) as usize;
     let mut long: FxMap<&[u8], u32> = FxMap::default();
-    // a 128 KB bitmap of query term hashes, so most tokens no query uses stop in L2
-    const FBITS: usize = 1 << 20;
-    let mut filt = vec![0u64; FBITS / 64];
     let hm = |k: u128| (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     for (t, &id) in &ids {
         if t.len() > 16 { long.insert(t, id); continue; }
@@ -182,8 +189,6 @@ fn main() {
         let mut i = h(k);
         while keys[i] != 0 { i = (i + 1) & (cap - 1); }
         keys[i] = k; vals[i] = id;
-        let fb = (hm(k) >> 20) as usize & (FBITS - 1);
-        filt[fb >> 6] |= 1 << (fb & 63);
     }
 
     let docs = map(&format!("{data}/docs.txt"));
@@ -207,17 +212,22 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, filt, bk, bv) = (&keys, &vals, &long, &lower, &filt, &bk, &bv);
+            let (keys, vals, long, lower, bk, bv, pf) = (&keys, &vals, &long, &lower, &bk, &bv, &pf);
             sc.spawn(move || {
-                let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), extra: Vec::new(), xstart: Vec::new(), doff: Vec::new() };
+                let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
+                let mut cnt = vec![0u32; nall + 1];
+                let (mut blocks, mut blk) = (Vec::new(), Vec::<u32>::new());
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
                     let mut prev = u32::MAX;
                     while c[i] != b'\t' { doc = doc * 10 + (c[i] - b'0') as u32; i += 1; }
                     if p.lo == u32::MAX { p.lo = doc; }
-                    p.xstart.push(p.extra.len() as u32);
+                    // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
+                    // the fill below can free each block as it goes and the peak stays low
+                    if blk.len() >= 1 << 20 { blocks.push(std::mem::take(&mut blk)); }
+                    blk.push(u32::MAX);
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
                     i += 1;
@@ -239,21 +249,21 @@ fn main() {
                         let id = if l <= 16 {
                             let k = pack(&docs[base + s..], l);
                             let m = hm(k);
-                            let fb = (m >> 20) as usize & (FBITS - 1);
                             let mut j = (m >> (shift - 64)) as usize;
-                            if filt[fb >> 6] >> (fb & 63) & 1 == 0 { None } else { loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); } }
+                            loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
                         } else if l <= 32 {
                             let mut t = [0u8; 32];
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
                             long.get(&t[..l]).copied()
                         } else { None };
                         if let Some(t) = id {
-                            if last[t as usize] != d { last[t as usize] = d; p.extra.push(t); }
+                            if last[t as usize] != d { last[t as usize] = d; blk.push(t); cnt[t as usize + 1] += 1; }
                             if prev != u32::MAX {
                                 let k = (prev as u64 + 1) << 32 | t as u64;
+                                let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
                                 let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
-                                while bk[j] != 0 {
-                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; p.extra.push(b); } break; }
+                                while pf[f >> 6] >> (f & 63) & 1 == 1 && bk[j] != 0 {
+                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; blk.push(b); cnt[b as usize + 1] += 1; } break; }
                                     j = (j + 1) & (bcap - 1);
                                 }
                             }
@@ -262,22 +272,19 @@ fn main() {
                     }
                     i += 1;
                 }
-                p.xstart.push(p.extra.len() as u32);
-                // doc lists by counting sort over the stream: count, prefix, fill. Sequential
-                // reads of the stream, and only small per term arrays get random access
-                let mut cnt = vec![0u32; nall + 1];
-                for &t in &p.extra { cnt[t as usize + 1] += 1; }
+                blocks.push(blk);
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut cur = cnt.clone();
                 let mut lists = vec![0u32; cnt[nall] as usize];
-                for d in 0..p.doff.len() {
-                    for &t in &p.extra[p.xstart[d] as usize..p.xstart[d + 1] as usize] {
-                        lists[cur[t as usize] as usize] = p.lo + d as u32;
+                let mut d = p.lo.wrapping_sub(1);
+                for b in blocks {
+                    for &t in &b {
+                        if t == u32::MAX { d = d.wrapping_add(1); continue; }
+                        lists[cur[t as usize] as usize] = d;
                         cur[t as usize] += 1;
                     }
                 }
                 p.lists = lists; p.loff = cnt;
-                p.extra = Vec::new(); p.xstart = Vec::new();
                 p
             })
         }).collect();
@@ -308,6 +315,7 @@ fn main() {
         }
     });
     let bs = |t: u32| { let i = bslot[t as usize]; (i != u32::MAX).then(|| &bits[i as usize * nw..(i as usize + 1) * nw]) };
+    let psum: Vec<u64> = (0..256u32).map(|b| (0..8).filter(|i| b >> i & 1 == 1).sum::<u32>() as u64).collect();
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
@@ -321,11 +329,6 @@ fn main() {
                 // and the per part answers just concatenate
                 // only the count, the sum and the first ten ids are printed
                 let (mut cnt, mut sum, mut r) = (0usize, 0u64, Vec::with_capacity(10));
-                let mut add = |x: &[u32]| {
-                    cnt += x.len();
-                    sum += x.iter().map(|&d| d as u64).sum::<u64>();
-                    for &d in x.iter().take(10 - r.len()) { r.push(d); }
-                };
                 let big = use_bits && match &qs[k] {
                     Q::Bool(v) => v.iter().map(|&(_, t)| parts.iter().map(|p| dl(p, t).len()).sum::<usize>()).sum::<usize>() > 2 * nw,
                     _ => false,
@@ -356,13 +359,14 @@ fn main() {
                             _ => for p in &parts { for &d in dl(p, t) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
                         }
                     }
+                    // count and sum word by word (a byte table gives the sum of bit positions);
+                    // only the first ten ids are pulled out one by one
                     for (w, x) in acc.iter_mut().enumerate() {
-                        let mut b = *x;
+                        let mut b = std::mem::take(x);
                         if b == 0 { continue; }
-                        *x = 0;
-                        let (mut one, mut m) = ([0u32; 64], 0);
-                        while b != 0 { one[m] = (w * 64) as u32 + b.trailing_zeros(); m += 1; b &= b - 1; }
-                        add(&one[..m]);
+                        cnt += b.count_ones() as usize;
+                        sum += b.count_ones() as u64 * (w as u64 * 64) + (0..8).map(|j| psum[(b >> (8 * j)) as u8 as usize] + 8 * j as u64 * ((b >> (8 * j)) as u8).count_ones() as u64).sum::<u64>();
+                        while b != 0 && r.len() < 10 { r.push((w * 64) as u32 + b.trailing_zeros()); b &= b - 1; }
                     }
                 }
                 for p in parts.iter().filter(|_| !big) {
@@ -372,7 +376,7 @@ fn main() {
                             for &(op, t) in &v[1..] {
                                 x = match op { 1 => and(&x, dl(p, t)), 2 => or(&x, dl(p, t)), _ => not(&x, dl(p, t)) };
                             }
-                            add(&x);
+                            add(&mut cnt, &mut sum, &mut r, &x);
                         }
                         Q::Phrase((ts, ks)) => {
                             // docs holding every term, then the doc text decides
@@ -381,7 +385,7 @@ fn main() {
                             let mut hit = dl(p, order[0]).to_vec();
                             for &t in &order[1..] { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
                             if ts.len() > 2 { hit.retain(|&d| has(docs, p.doff[(d - p.lo) as usize] as usize, ks)); }
-                            add(&hit);
+                            add(&mut cnt, &mut sum, &mut r, &hit);
                         }
                     }
                 }
