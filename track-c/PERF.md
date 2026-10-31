@@ -50,6 +50,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Round 7
 
 - The name insert now runs one record late. Each record hashes its name and prefetches its table slot and seen word, then does the insert for the record before it, so those two cache misses overlap the parse of the next record. Local CPU time went from 0.37 s to 0.28 s.
+- Board: 0.0692 s, 12 MB, 68.59 points, rank 43 of 89 (run-ec706f86af24).
 - Tried and dropped: keeping 2, 4 or 8 records in flight. No better than 1 locally.
 
 ## Next ideas
