@@ -173,6 +173,7 @@ fn main() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    //MARK
     let mut total = vec![Agg::new(); ng];
     for a in &aggs {
         for g in 0..ng {
