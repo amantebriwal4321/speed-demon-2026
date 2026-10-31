@@ -36,6 +36,11 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - glibc kept every 16 KB row block in its thread arenas. With M_MMAP_THRESHOLD just under 16 KB each block is its own mapping, and each hour's blocks are dropped as soon as the hour is done. The local anonymous peak went from 25 MB to 17 MB. Board: 0.0465 s, 23 MB (from 33), 74.30 points, a new best, rank 49 to 47 of 106 (run-9039a2342ca7).
 - Tried and dropped: MADV_POPULATE_READ on each thread's range before parsing. About 10 ms slower locally.
 
+## Round 6 (looked into, not built)
+
+- The idea was a streaming hour by hour pass that only keeps the current hour's rows. A proper count killed it. 405,921 of the 3.1M lines sit behind the newest hour seen so far, not 491. The 491 was the number of places where one line's hour is lower than the line just before it. The spec says why: shard 0 uploads each hour 5 to 10 minutes after it ends, and no bound on lateness is promised.
+- So no hour can be finished early and still be exact. Every finished hour would have to wait for the end of the file, or be recomputed when a late line turns up. The output text waiting to be written (10 MB) would take the place of the rows (12 MB), so memory would barely move, and the run would get slower and the code longer.
+
 ## Next ideas
 
 Radix sort per hour, and a faster integer formatter for the output.
