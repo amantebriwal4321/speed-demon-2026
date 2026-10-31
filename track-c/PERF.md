@@ -53,6 +53,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Board: 0.0692 s, 12 MB, 68.59 points, rank 43 of 89 (run-ec706f86af24).
 - Tried and dropped: keeping 2, 4 or 8 records in flight. No better than 1 locally.
 
+## Round 8 (measured, not built)
+
+- Giving each thread its own countries would make the seen bitsets private. As an upper bound I swapped the atomic OR for a plain load and store, which is wrong but free. It was only 2 to 3% faster locally. Splitting the countries across threads would need a second pass or a 13 MB record buffer, which costs more than that, so it stays as it is.
+
 ## Next ideas
 
 The per country bitsets of names seen are the next cost: one atomic OR per record into 8 MB.
