@@ -1,3 +1,4 @@
+use std::io::Write;
 
 const HOURS: usize = 72; // 2026-10-30T18 .. 2026-11-02T17
 
@@ -134,14 +135,8 @@ fn main() {
     // hours get written in order as soon as they and every hour before them are done, so
     // only a few finished hours ever wait in memory
     std::fs::create_dir_all(&out).ok();
-    // O_DIRECT, so the 10 MB of output skips the page cache, which the memory peak counts.
-    // Bytes go out in whole 4 KB blocks from an aligned buffer; the tail is padded, then cut off.
-    use std::os::unix::fs::OpenOptionsExt;
-    let path = format!("{out}/summary.txt");
-    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).custom_flags(0o40000).open(&path).unwrap();
-    const STAGE: usize = 1 << 20;
-    let stage = unsafe { std::slice::from_raw_parts_mut(std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(2 * STAGE, 4096).unwrap()), 2 * STAGE) };
-    let wr = std::sync::Mutex::new((0usize, (0..HOURS).map(|_| None).collect::<Vec<Option<Vec<u8>>>>(), &file, stage, 0usize, 0u64));
+    let file = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
+    let wr: std::sync::Mutex<(usize, Vec<Option<Vec<u8>>>, &std::fs::File)> = std::sync::Mutex::new((0, (0..HOURS).map(|_| None).collect(), &file));
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
@@ -210,29 +205,13 @@ fn main() {
                     while w.0 < HOURS {
                         let k = w.0;
                         let Some(x) = w.1[k].take() else { break };
-                        let (f, st, len) = (w.2, &mut *w.3 as *mut [u8], w.4);
-                        let st = unsafe { &mut *st };
-                        st[len..len + x.len()].copy_from_slice(&x);
-                        let mut len = len + x.len();
-                        if len >= STAGE {
-                            let n = len & !4095;
-                            std::os::unix::fs::FileExt::write_all_at(f, &st[..n], w.5).unwrap();
-                            w.5 += n as u64;
-                            st.copy_within(n..len, 0);
-                            len -= n;
-                        }
-                        w.4 = len;
+                        (&*w.2).write_all(&x).unwrap();
                         w.0 += 1;
                     }
                 }
             });
         }
     });
-    let w = wr.into_inner().unwrap();
-    let (n, at) = ((w.4 + 4095) & !4095, w.5);
-    w.3[w.4..n].fill(0);
-    std::os::unix::fs::FileExt::write_all_at(&file, &w.3[..n], at).unwrap();
-    file.set_len(at + w.4 as u64).unwrap();
     std::process::exit(0);
 }
 

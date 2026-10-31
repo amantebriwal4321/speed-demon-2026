@@ -135,6 +135,10 @@ fn term<'a>(ids: &mut FxMap<&'a [u8], u32>, t: &'a [u8]) -> u32 {
 }
 
 fn main() {
+    // keep big blocks on their own mappings, so a freed pair block goes back to the kernel
+    // (glibc would otherwise raise its mmap threshold and keep them in the heap)
+    extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
+    unsafe { mallopt(-3, 1 << 20) }; // M_MMAP_THRESHOLD
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
     let qb = std::fs::read(format!("{data}/queries.txt")).unwrap();
