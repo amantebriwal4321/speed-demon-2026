@@ -43,7 +43,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 ## Round 7
 
-- Profiling the parse showed the endpoint lookup took up to a third of it. Most endpoints are over 16 bytes, so every hit compared against the first copy somewhere in the 240 MB file, which was a cache miss nearly every line. Each thread now keeps a copy of its endpoint names in a small arena (about 75 KB) and compares against that. Board: 0.0476 s against 0.0465 to 0.0470 s before, and 6 more lines (run-14a3cacb173a), so it was reverted.
+- Profiling the parse showed the endpoint lookup took up to a third of it. Most endpoints are over 16 bytes, so every hit compared against the first copy somewhere in the 240 MB file, which was a cache miss nearly every line. Each thread now keeps a copy of its endpoint names in a small arena (about 75 KB) and compares against that. Board: 0.0476 s against 0.0465 to 0.0470 s before, and 6 more lines (run-14a3cacb173a), so it was reverted. The revert then ran 0.0486 s (run-beb660fac341), and C's unchanged code ran anywhere from 0.069 to 0.091 s on the board. A single board run is noisier than this change, so the arena goes back in. It's faster locally, and its one board run beat the revert's.
 
 ## Next ideas
 

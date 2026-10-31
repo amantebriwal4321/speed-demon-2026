@@ -23,7 +23,7 @@ impl Hr {
     }
 }
 
-struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)> }
+struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)>, arena: Vec<u8>, aoff: Vec<u32> }
 const TB: usize = 1 << 13;
 
 fn main() {
@@ -51,7 +51,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
-                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new() };
+                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), arena: Vec::with_capacity(1 << 17), aoff: Vec::new() };
                 let mut rows: Vec<Hr> = (0..HOURS).map(|_| Hr { blocks: Vec::new(), side: Vec::new() }).collect();
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
@@ -108,10 +108,11 @@ fn main() {
                                 let id = e.start.len() as u32;
                                 e.slot[s] = id; e.start.push((es + base) as u32); e.len.push(l as u32);
                                 e.key.push((w0, w1, l as u32));
+                                e.aoff.push(e.arena.len() as u32); e.arena.extend_from_slice(&c[es..ee]);
                                 break id;
                             }
                             let k = unsafe { e.key.get_unchecked(x as usize) };
-                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; eq(&b[st..st + l], &c[es..ee]) }) { break x; }
+                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.aoff[x as usize] as usize; eq(&e.arena[st..st + l], &c[es..ee]) }) { break x; }
                             s = (s + 1) & (TB - 1);
                         };
                         let r = unsafe { rows.get_unchecked_mut(hour) };
