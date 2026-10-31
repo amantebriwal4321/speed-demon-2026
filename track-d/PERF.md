@@ -1,13 +1,16 @@
 # Track D: performance log
 
-Local numbers are from an 8 thread Linux box, seed 1 full data, best of 5 runs, sha256 matching the published `a23dbdf0...`.
+Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are the board's own numbers, sha256 matching the published `a23dbdf0...`.
 
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
 | 1 | Rust, parallel parse, CSR graph, Dijkstra with early exit, queries spread over threads | run-85a7d4602e41 | 1.647 | 338 | 41.03 |
+| 2 | mmap, parallel CSR, parallel BFS relabel for locality, bidirectional Dijkstra | run-5b13f5193b36 | 0.295 | 494 | 55.86 |
+| 3 | u32 distances with a side map for the few above 2^32 | run-aa04a894c3d5 | 0.306 | 327 | 56.94 |
+| 4 | CSR built per node range bucket, no atomics | run-093e22eb3b78 | 0.277 | 314 | 57.96 |
 
-## Why it got faster
+## Step 1: why it got faster
 
 - Edge lines get parsed on all threads, then packed into a CSR array (offsets plus `(head, weight)` pairs). Self loops are dropped while building, since they can never shorten a path.
 - Each query is a Dijkstra with a binary heap that stops as soon as the target is popped. Targets are picked by Dijkstra rank (median rank 512), so most searches settle a tiny part of the graph.
@@ -15,6 +18,13 @@ Local numbers are from an 8 thread Linux box, seed 1 full data, best of 5 runs, 
 - Distances are `u64`, so sums above 2^32 just work. `u64::MAX` marks unreachable and prints as `-1`.
 - Query time is now well under parse time, so the parse is the next target.
 
+## Round 2
+
+- Queries were 90% of the time. Bidirectional Dijkstra with the standard stop rule (top forward + top backward >= best) halves the area each search covers.
+- Node ids are random, so every dist read was a cache miss. A parallel BFS relabel (each thread grows regions and claims nodes with a CAS) puts graph neighbours next to each other in memory. Which thread wins a node only changes the layout, never an answer.
+- Distances are u32 now, with the rare value above 2^32 kept in a side HashMap, which halves the per thread arrays.
+- Edges are sorted into buckets by tail node range while parsing, so each thread builds its own slice of the CSR with no atomics.
+
 ## Next ideas
 
-Bidirectional search, and a faster integer parser over the 92 MB graph file.
+A hash based distance map per thread to cut memory, and a faster integer parser.
