@@ -54,7 +54,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 ## Round 6
 
-- A 32 KB filter of query term hashes sits in front of the 4 MB term table, so a token that can't be a query term skips the prefetch and the probe. Locally that's about 2% faster. An earlier 128 KB term bitmap came out in 9007210, and this one is a quarter of the size.
+- A 32 KB filter of query term hashes sits in front of the 4 MB term table, so a token that can't be a query term skips the prefetch and the probe. Locally that's about 2% faster, but on the board it ran 0.379 s against 0.355 to 0.357 s for the version before it (run-bdb28e0d53a4), so it was reverted. An earlier 128 KB term bitmap came out in 9007210, and this one is a quarter of the size.
 
 ## Next ideas
 

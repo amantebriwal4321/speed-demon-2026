@@ -49,7 +49,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 ## Round 6
 
-- The binary heaps are now radix heaps. Dijkstra only pushes keys at or above the last one popped, so a key goes in the bucket of the highest bit where it differs from that key, and a pop only redistributes the lowest non-empty bucket. Locally that's about 3% faster.
+- The binary heaps are now radix heaps. Dijkstra only pushes keys at or above the last one popped, so a key goes in the bucket of the highest bit where it differs from that key, and a pop only redistributes the lowest non-empty bucket. Locally that's about 3% faster. Board: 0.280 s, 149 MB, 60.19 points, a new best (run-6e38f286db80).
 
 ## Next ideas
 
