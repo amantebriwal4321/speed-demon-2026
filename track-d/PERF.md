@@ -9,6 +9,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 2 | mmap, parallel CSR, parallel BFS relabel for locality, bidirectional Dijkstra | run-5b13f5193b36 | 0.295 | 494 | 55.86 |
 | 3 | u32 distances with a side map for the few above 2^32 | run-aa04a894c3d5 | 0.306 | 327 | 56.94 |
 | 4 | CSR built per node range bucket, no atomics | run-093e22eb3b78 | 0.277 | 314 | 57.96 |
+| 5 | per query distances in a small open addressing table instead of a dense array per thread | run-5205ad48a187 | 0.307 | 172 | 59.08 |
 
 ## Step 1: why it got faster
 
@@ -24,6 +25,12 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Node ids are random, so every dist read was a cache miss. A parallel BFS relabel (each thread grows regions and claims nodes with a CAS) puts graph neighbours next to each other in memory. Which thread wins a node only changes the layout, never an answer.
 - Distances are u32 now, with the rare value above 2^32 kept in a side HashMap, which halves the per thread arrays.
 - Edges are sorted into buckets by tail node range while parsing, so each thread builds its own slice of the CSR with no atomics.
+
+## Round 3
+
+- Each of the 12 query threads had two dense u32 arrays over 1.74M nodes, about 167 MB in total. A query reaches about 4k nodes on average (78k at most), so each side now uses a 16k slot open addressing table that grows on demand and gets wiped after every query.
+- That costs 30 ms on the board, but memory drops from 314 MB to 172 MB, so it comes out ahead on points.
+- Tried and dropped: parsing twice to skip the edge buckets (70 ms slower, same peak) and skipping the BFS relabel (much slower queries).
 
 ## Next ideas
 

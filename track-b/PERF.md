@@ -7,6 +7,8 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 0 | The reference, unchanged | | 56.35 | 2,200 | 0 |
 | 1 | Rust, queries first, index only the query terms, positional postings, parallel build and parallel queries | run-a80f93dff992 | 0.798 | 989 | 46.13 |
 | 2 | token stream of term ids for phrases instead of (doc, pos) postings, packed u128 token table, queries run per part, mmap | run-52fac7961fbc | 0.631 | 366 | 52.19 |
+| 3 | doc lists by counting sort over the stream, SSE2 tokenizer, better hash mixing, only count, sum and top 10 kept per query | run-fd411d459da0 | 0.417 | 289 | 56.88 |
+| 4 | u16 token stream: phrase terms get the low ids, other query terms go to a per doc presence list | run-9a693a205195 | 0.428 | 213 | 57.35 |
 
 ## Step 1: why it got faster
 
@@ -24,6 +26,15 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Each thread's chunk is one doc range, so every query runs per part and the answers just concatenate. No merged posting lists, which saved about 110 MB.
 - Tried and dropped: retokenizing candidate docs instead of keeping the stream. It used less memory but cost 300 ms more on the 232k candidate docs.
 
+## Round 3
+
+- Doc lists used to be pushed one by one into 75k growing vectors, and almost every push was a cache miss. Now each thread counts per term, does a prefix sum and fills one flat array. Two sequential passes over the stream beat one random one.
+- The tokenizer builds 64 byte masks for "token byte" and "LF" with SSE2 and walks them with trailing_zeros, instead of a branch per byte.
+- The hasher's finish now rotates, because hashbrown indexes with the low bits and a multiply leaves those weak.
+- A query only prints its count, its sum and its first ten ids, so the per part answers stop getting concatenated.
+- Phrase terms get ids first. There are 33k of them, so the stream fits in u16, and the other query terms only need a deduped per doc list to build their doc lists. If a phrase term ever lands past 65534 it gets a marker in the stream and the doc text gets retokenized to confirm. That path was tested by forcing the cutoff to 1000.
+- Tried and dropped: merging into one global doc list per term. Same speed, more memory.
+
 ## Next ideas
 
-The doc list pushes are now the main cost. A two pass counting build or bitsets for very common terms should help.
+The query phase is now the biggest piece, mostly long OR and AND chains over the common terms. Bitsets for the most frequent terms are next.
