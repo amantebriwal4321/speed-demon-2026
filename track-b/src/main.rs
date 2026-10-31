@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Default)]
 struct Fx(u64);
 impl Hasher for Fx {
-    fn finish(&self) -> u64 { self.0 }
+    fn finish(&self) -> u64 { self.0.rotate_left(26) } // the multiply leaves entropy in the high bits; hashbrown indexes with the low ones
     fn write(&mut self, b: &[u8]) {
         let mut h = self.0;
         let mut c = b.chunks_exact(8);
@@ -51,6 +51,46 @@ fn or(a: &[u32], b: &[u32]) -> Vec<u32> {
 fn not(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut j = 0;
     a.iter().copied().filter(|&x| !seek(b, &mut j, x)).collect()
+}
+
+// a token of up to 16 bytes, ASCII lowercased, packed little endian into a u128 (zero padded)
+#[inline]
+fn pack(b: &[u8], l: usize) -> u128 {
+    let word = |o: usize| -> u64 {
+        let mut x = [0u8; 8];
+        let n = b.len().saturating_sub(o).min(8);
+        x[..n].copy_from_slice(&b[o..o + n]);
+        let x = u64::from_le_bytes(x);
+        // set bit 5 of every byte in A..Z; token bytes are all ASCII letters or digits
+        let h = x & 0x7f7f7f7f7f7f7f7f;
+        let up = h.wrapping_add(0x3f3f3f3f3f3f3f3f) & !h.wrapping_add(0x2525252525252525) & !x & 0x8080808080808080;
+        x | up >> 2
+    };
+    let mask = |n: usize| if n >= 8 { u64::MAX } else { (1u64 << (8 * n)) - 1 };
+    let lo = word(0) & mask(l) as u64;
+    let hi = if l > 8 { word(8) & mask(l - 8) } else { 0 };
+    (hi as u128) << 64 | lo as u128
+}
+
+// bit i set when b[at + i] is a token byte (a-z, A-Z, 0-9), and when it is LF; SSE2 only
+fn masks(b: &[u8], at: usize) -> (u64, u64) {
+    use std::arch::x86_64::*;
+    let mut pad = [0u8; 64];
+    let src = if at + 64 <= b.len() { &b[at..at + 64] } else { let n = b.len() - at; pad[..n].copy_from_slice(&b[at..]); &pad[..] };
+    let (mut t, mut n) = (0u64, 0u64);
+    unsafe {
+        for q in 0..4 {
+            let x = _mm_loadu_si128(src.as_ptr().add(16 * q) as *const __m128i);
+            let flip = _mm_set1_epi8(-128);
+            // unsigned v < k  <=>  (v ^ 0x80) < (k ^ 0x80) as signed bytes
+            let letter = _mm_cmplt_epi8(_mm_xor_si128(_mm_sub_epi8(_mm_or_si128(x, _mm_set1_epi8(0x20)), _mm_set1_epi8(b'a' as i8)), flip), _mm_set1_epi8((26u8 ^ 0x80) as i8));
+            let digit = _mm_cmplt_epi8(_mm_xor_si128(_mm_sub_epi8(x, _mm_set1_epi8(b'0' as i8)), flip), _mm_set1_epi8((10u8 ^ 0x80) as i8));
+            let lf = _mm_cmpeq_epi8(x, _mm_set1_epi8(b'\n' as i8));
+            t |= (_mm_movemask_epi8(_mm_or_si128(letter, digit)) as u16 as u64) << (16 * q);
+            n |= (_mm_movemask_epi8(lf) as u16 as u64) << (16 * q);
+        }
+    }
+    (t, n)
 }
 
 fn term<'a>(ids: &mut FxMap<&'a [u8], u32>, t: &'a [u8]) -> u32 {
@@ -116,13 +156,14 @@ fn main() {
     // per thread: a doc list for every query term, plus the chunk's token stream as term ids
     // (u32::MAX for tokens no query uses) with each doc's start, so phrases are checked
     // by comparing ints. Chunks are in file order, so each part covers one doc range.
-    struct Part { lo: u32, docs: Vec<Vec<u32>>, stream: Vec<u32>, start: Vec<u32> }
+    struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, stream: Vec<u32>, start: Vec<u32> }
     let parts: Vec<Part> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
+            let base = cuts[k];
             let (keys, vals, long, lower, h) = (&keys, &vals, &long, &lower, &h);
             sc.spawn(move || {
-                let mut p = Part { lo: u32::MAX, docs: vec![Vec::new(); nterm], stream: Vec::with_capacity(c.len() / 6), start: Vec::new() };
+                let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), stream: Vec::with_capacity(c.len() / 6), start: Vec::new() };
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
@@ -130,14 +171,23 @@ fn main() {
                     if p.lo == u32::MAX { p.lo = doc; }
                     p.start.push(p.stream.len() as u32);
                     i += 1;
+                    // token and LF bitmasks of a 64 byte window, then walk the bits
+                    let mut o = 64; // offset inside the current window, 64 = need a new one
+                    let (mut tm, mut nm) = (0u64, 0u64);
                     loop {
-                        while lower[c[i] as usize] == 0 && c[i] != b'\n' { i += 1; }
-                        if c[i] == b'\n' { break; }
+                        if o >= 64 { (tm, nm) = masks(docs, base + i); o = 0; }
+                        let bits = (tm | nm) >> o;
+                        if bits == 0 { i += 64 - o; o = 64; continue; }
+                        let z = bits.trailing_zeros() as usize;
+                        i += z; o += z;
+                        if nm >> o & 1 == 1 { break; }
                         let s = i;
-                        let mut k = 0u128;
-                        let mut l = 0;
-                        while lower[c[i] as usize] != 0 { if l < 16 { k |= (lower[c[i] as usize] as u128) << (8 * l); } l += 1; i += 1; }
+                        let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
+                        i += run; o += run;
+                        if o >= 64 { while lower[c[i] as usize] != 0 { i += 1; } o = 64; }
+                        let l = i - s;
                         let id = if l <= 16 {
+                            let k = pack(&docs[base + s..], l);
                             let mut j = h(k);
                             loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
                         } else if l <= 32 {
@@ -145,24 +195,41 @@ fn main() {
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
                             long.get(&t[..l]).copied()
                         } else { None };
-                        match id {
-                            Some(t) => {
-                                if p.docs[t as usize].last() != Some(&doc) { p.docs[t as usize].push(doc); }
-                                p.stream.push(t);
-                            }
-                            None => p.stream.push(u32::MAX),
-                        }
+                        p.stream.push(id.unwrap_or(u32::MAX));
                     }
                     i += 1;
                 }
                 p.start.push(p.stream.len() as u32);
+                // doc lists by counting sort over the stream: count, prefix, fill. Sequential
+                // reads of the stream, and only small per term arrays get random access
+                let mut last = vec![u32::MAX; nterm];
+                let mut cnt = vec![0u32; nterm + 1];
+                for d in 0..p.start.len() - 1 {
+                    for &t in &p.stream[p.start[d] as usize..p.start[d + 1] as usize] {
+                        if t != u32::MAX && last[t as usize] != d as u32 { last[t as usize] = d as u32; cnt[t as usize + 1] += 1; }
+                    }
+                }
+                for t in 0..nterm { cnt[t + 1] += cnt[t]; }
+                let mut cur = cnt.clone();
+                let mut lists = vec![0u32; cnt[nterm] as usize];
+                last.fill(u32::MAX);
+                for d in 0..p.start.len() - 1 {
+                    for &t in &p.stream[p.start[d] as usize..p.start[d + 1] as usize] {
+                        if t != u32::MAX && last[t as usize] != d as u32 {
+                            last[t as usize] = d as u32;
+                            lists[cur[t as usize] as usize] = p.lo + d as u32;
+                            cur[t as usize] += 1;
+                        }
+                    }
+                }
+                p.lists = lists; p.loff = cnt;
                 p
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    fn dl(p: &Part, t: u32) -> &Vec<u32> { &p.docs[t as usize] }
+    fn dl(p: &Part, t: u32) -> &[u32] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
 
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
@@ -173,32 +240,39 @@ fn main() {
                 if k >= qs.len() { break; }
                 // parts cover disjoint, ascending doc ranges, so each query runs per part
                 // and the per part answers just concatenate
-                let mut r: Vec<u32> = Vec::new();
+                // only the count, the sum and the first ten ids are printed
+                let (mut cnt, mut sum, mut r) = (0usize, 0u64, Vec::with_capacity(10));
+                let mut add = |x: &[u32]| {
+                    cnt += x.len();
+                    sum += x.iter().map(|&d| d as u64).sum::<u64>();
+                    for &d in x.iter().take(10 - r.len()) { r.push(d); }
+                };
                 for p in &parts {
                     match &qs[k] {
                         Q::Bool(v) => {
-                            let mut x = dl(p, v[0].1).clone();
+                            let mut x = dl(p, v[0].1).to_vec();
                             for &(op, t) in &v[1..] {
                                 x = match op { 1 => and(&x, dl(p, t)), 2 => or(&x, dl(p, t)), _ => not(&x, dl(p, t)) };
                             }
-                            r.extend_from_slice(&x);
+                            add(&x);
                         }
                         Q::Phrase(ts) => {
                             // docs holding the two rarest terms, then an int compare scan of each
                             let mut order: Vec<u32> = ts.clone();
                             order.sort_by_key(|&t| dl(p, t).len());
                             let n = ts.len();
-                            for d in and(dl(p, order[0]), dl(p, order[1])) {
+                            let mut hit = and(dl(p, order[0]), dl(p, order[1]));
+                            hit.retain(|&d| {
                                 let i = (d - p.lo) as usize;
                                 let toks = &p.stream[p.start[i] as usize..p.start[i + 1] as usize];
-                                if toks.windows(n).any(|w| w == &ts[..]) { r.push(d); }
-                            }
+                                toks.windows(n).any(|w| w == &ts[..])
+                            });
+                            add(&hit);
                         }
                     }
                 }
                 let mut o = Vec::new();
-                let sum: u64 = r.iter().map(|&x| x as u64).sum();
-                write!(o, "{} {}", r.len(), sum).unwrap();
+                write!(o, "{} {}", cnt, sum).unwrap();
                 for x in r.iter().take(10) { write!(o, " {x}").unwrap(); }
                 o.push(b'\n');
                 res[k].set(o).ok();
