@@ -141,7 +141,7 @@ fn main() {
     unsafe { mallopt(-3, 1 << 20) }; // M_MMAP_THRESHOLD
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    let qb = std::fs::read(format!("{data}/queries.txt")).unwrap();
+    let qb = map(&format!("{data}/queries.txt"));
 
     // queries first: only the terms they use get indexed
     let mut ids: FxMap<&[u8], u32> = FxMap::default();
@@ -237,31 +237,7 @@ fn main() {
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
                     i += 1;
-                    // token and LF bitmasks of a 64 byte window, then walk the bits
-                    let mut o = 64; // offset inside the current window, 64 = need a new one
-                    let (mut tm, mut nm) = (0u64, 0u64);
-                    loop {
-                        if o >= 64 { (tm, nm) = masks(docs, base + i); o = 0; }
-                        let bits = (tm | nm) >> o;
-                        if bits == 0 { i += 64 - o; o = 64; continue; }
-                        let z = bits.trailing_zeros() as usize;
-                        i += z; o += z;
-                        if nm >> o & 1 == 1 { break; }
-                        let s = i;
-                        let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
-                        i += run; o += run;
-                        if o >= 64 { while lower[c[i] as usize] != 0 { i += 1; } o = 64; }
-                        let l = i - s;
-                        let id = if l <= 16 {
-                            let k = pack(&docs[base + s..], l);
-                            let m = hm(k);
-                            let mut j = (m >> (shift - 64)) as usize;
-                            loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
-                        } else if l <= 32 {
-                            let mut t = [0u8; 32];
-                            for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
-                            long.get(&t[..l]).copied()
-                        } else { None };
+                    macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
                             if last[t as usize] != d { last[t as usize] = d; blk.push(t); cnt[t as usize + 1] += 1; }
                             if prev != u32::MAX {
@@ -274,7 +250,42 @@ fn main() {
                                 }
                             }
                         }
-                        prev = id.unwrap_or(u32::MAX);
+                        prev = id.unwrap_or(u32::MAX); }} }
+                    let lookup = |p: (u8, u128, usize, Option<u32>)| -> Option<u32> {
+                        if p.0 == 2 { return p.3; }
+                        let (k, mut j) = (p.1, p.2);
+                        loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
+                    };
+                    let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
+                    // token and LF bitmasks of a 64 byte window, then walk the bits
+                    let mut o = 64; // offset inside the current window, 64 = need a new one
+                    let (mut tm, mut nm) = (0u64, 0u64);
+                    loop {
+                        if o >= 64 { (tm, nm) = masks(docs, base + i); o = 0; }
+                        let bits = (tm | nm) >> o;
+                        if bits == 0 { i += 64 - o; o = 64; continue; }
+                        let z = bits.trailing_zeros() as usize;
+                        i += z; o += z;
+                        if nm >> o & 1 == 1 { if pend.0 != 0 { handle!(lookup(pend)); pend.0 = 0; } break; }
+                        let s = i;
+                        let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
+                        i += run; o += run;
+                        if o >= 64 { while lower[c[i] as usize] != 0 { i += 1; } o = 64; }
+                        let l = i - s;
+                        // a short token's slot is prefetched and looked up one token later, so the
+                        // table miss overlaps the scan of the next token
+                        let nx: (u8, u128, usize, Option<u32>) = if l <= 16 {
+                            let k = pack(&docs[base + s..], l);
+                            let j = (hm(k) >> (shift - 64)) as usize;
+                            unsafe { std::arch::x86_64::_mm_prefetch(keys.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
+                            (1, k, j, None)
+                        } else if l <= 32 {
+                            let mut t = [0u8; 32];
+                            for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
+                            (2, 0, 0, long.get(&t[..l]).copied())
+                        } else { (2, 0, 0, None) };
+                        if pend.0 != 0 { handle!(lookup(pend)); }
+                        pend = nx;
                     }
                     i += 1;
                 }
