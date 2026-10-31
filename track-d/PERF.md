@@ -43,6 +43,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Profile on 8 threads: parse 23 ms, CSR 13 ms, BFS relabel 48 ms, reverse graph 17 ms, queries 120 ms. The queries settle 7.1M nodes in all, about 3.5k per query.
 - Peak memory was the query phase holding arrays it no longer needed: the old offsets, the BFS lists and order, the reverse degree and cursor arrays, and newid after the queries are mapped. They are dropped as soon as they're used, and queries.txt is mapped. The local peak went from 143 MB to 116 MB.
 - An improving edge used to probe the distance table twice, once to read and once to write. It now reuses the slot from the read. Locally that's about 7% faster.
+- Board: 0.298 s, 144 MB, 60.08 points, a new best, rank 45 to 40 of 93 (run-0ba83db1c675).
 - Tried and dropped: pruning labels with nd + the other side's heap top >= best. It's correct, but best is found late, so it saved nothing.
 - Tried and dropped: wiping only the touched slots after each query instead of the whole table. No difference.
 
