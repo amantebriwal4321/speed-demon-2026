@@ -37,8 +37,10 @@ impl Dist {
         match k as u32 { SPILL => self.big[&v], x => x as u64 }
     }
     #[inline]
-    fn set(&mut self, v: u32, d: u64) {
-        let mut i = self.slot(v);
+    fn set(&mut self, v: u32, d: u64) { let i = self.slot(v); self.set_at(i, v, d) }
+    // set with the slot already found by slot(v)
+    #[inline]
+    fn set_at(&mut self, mut i: usize, v: u32, d: u64) {
         if self.t[i] == E {
             if (self.len + 1) * 2 > self.t.len() { self.grow(); i = self.slot(v); }
             self.len += 1;
@@ -161,6 +163,7 @@ fn main() {
     });
     drop(owner);
     let order: Vec<u32> = lists.concat();
+    drop(lists);
     let mut newid = vec![0u32; n];
     for (k, &u) in order.iter().enumerate() { newid[u as usize] = k as u32; }
     let mut noff = vec![0u32; n + 1];
@@ -192,7 +195,7 @@ fn main() {
             }
         });
     }
-    drop(adj);
+    drop(adj); drop(off); drop(order);
     let (off, adj) = (noff, nadj);
     // reverse graph for the backward search
     let rdeg: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
@@ -205,6 +208,7 @@ fn main() {
     });
     let mut roff = vec![0u32; n + 1];
     for k in 0..n { roff[k + 1] = roff[k] + rdeg[k].load(Relaxed); }
+    drop(rdeg);
     let rcur: Vec<AtomicU32> = roff[..n].iter().map(|&x| AtomicU32::new(x)).collect();
     let mut radj: Vec<(u32, u32)> = Vec::with_capacity(total);
     unsafe { radj.set_len(total) };
@@ -222,10 +226,12 @@ fn main() {
         }
     });
 
-    let q = std::fs::read(format!("{data}/queries.txt")).unwrap();
+    drop(rcur);
+    let q = map(&format!("{data}/queries.txt"));
     let mut qs = Vec::new();
     let mut j = 0;
-    while j < q.len() { let s = num(&q, &mut j); let t = num(&q, &mut j); qs.push((newid[s as usize], newid[t as usize])); }
+    while j < q.len() { let s = num(q, &mut j); let t = num(q, &mut j); qs.push((newid[s as usize], newid[t as usize])); }
+    drop(newid);
 
     let ans: Vec<AtomicU64> = (0..qs.len()).map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
@@ -259,10 +265,12 @@ fn main() {
                             let (mine, other) = if side == 0 { (df, &*db) } else { (db, &*df) };
                             for &(v, w) in &a[o[u as usize] as usize..o[u as usize + 1] as usize] {
                                 let nd = d + w as u64;
-                                let dv = mine.get(v);
+                                let i = mine.slot(v);
+                                let k = mine.t[i];
+                                let dv = if k == E { u64::MAX } else if k as u32 == SPILL { mine.big[&v] } else { k as u32 as u64 };
                                 if nd < dv {
                                     if dv == u64::MAX { touched[side].push(v); }
-                                    mine.set(v, nd);
+                                    mine.set_at(i, v, nd);
                                     heap[side].push(Reverse((nd, v)));
                                     let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }

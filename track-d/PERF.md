@@ -38,6 +38,14 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Each distance table slot now packs node and distance into one u64, so a probe is one load.
 - Tried and dropped: a heap of packed u64 (dist, node) keys. It made no measurable difference, because the time goes to the hash probes and the edge reads, not the heap.
 
+## Round 5
+
+- Profile on 8 threads: parse 23 ms, CSR 13 ms, BFS relabel 48 ms, reverse graph 17 ms, queries 120 ms. The queries settle 7.1M nodes in all, about 3.5k per query.
+- Peak memory was the query phase holding arrays it no longer needed: the old offsets, the BFS lists and order, the reverse degree and cursor arrays, and newid after the queries are mapped. They are dropped as soon as they're used, and queries.txt is mapped. The local peak went from 143 MB to 116 MB.
+- An improving edge used to probe the distance table twice, once to read and once to write. It now reuses the slot from the read. Locally that's about 7% faster.
+- Tried and dropped: pruning labels with nd + the other side's heap top >= best. It's correct, but best is found late, so it saved nothing.
+- Tried and dropped: wiping only the touched slots after each query instead of the whole table. No difference.
+
 ## Next ideas
 
 A hash based distance map per thread to cut memory, and a faster integer parser.
