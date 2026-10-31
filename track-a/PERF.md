@@ -41,6 +41,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - The idea was a streaming hour by hour pass that only keeps the current hour's rows. A proper count killed it. 405,921 of the 3.1M lines sit behind the newest hour seen so far, not 491. The 491 was the number of places where one line's hour is lower than the line just before it. The spec says why: shard 0 uploads each hour 5 to 10 minutes after it ends, and no bound on lateness is promised.
 - So no hour can be finished early and still be exact. Every finished hour would have to wait for the end of the file, or be recomputed when a late line turns up. The output text waiting to be written (10 MB) would take the place of the rows (12 MB), so memory would barely move, and the run would get slower and the code longer.
 
+## Round 7
+
+- Profiling the parse showed the endpoint lookup took up to a third of it. Most endpoints are over 16 bytes, so every hit compared against the first copy somewhere in the 240 MB file, which was a cache miss nearly every line. Each thread now keeps a copy of its endpoint names in a small arena (about 75 KB) and compares against that.
+
 ## Next ideas
 
 Radix sort per hour, and a faster integer formatter for the output.
