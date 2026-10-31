@@ -29,6 +29,9 @@ const TB: usize = 1 << 13;
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
+    // blocks of 16 KB and up get their own mmap, so a freed hour really leaves the process
+    extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
+    unsafe { mallopt(-3, 16 * 1024 - 64) }; // M_MMAP_THRESHOLD
     let b = map(&format!("{data}/requests.log"));
     // method length from its first two bytes
     let mut mlen = vec![0u8; 1 << 16];
@@ -168,7 +171,7 @@ fn main() {
                         } }
                         for &x in &r.side { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = (x >> 1) as u32; errv[g] += x & 1; cur[g] += 1; }
                     }
-                    std::mem::forget(rs); // freeing costs time, and the peak is already reached
+                    drop(rs); // the blocks are their own mappings, so this hands the pages back while the output grows in the page cache
                     let mut o = Vec::with_capacity(ne * 48);
                     let hdr = format!("{date}T{hh:02}:00:00Z ").into_bytes();
                     for g in 0..ne {

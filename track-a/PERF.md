@@ -30,6 +30,11 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - The mmap version spent a good part of the scan in page faults. Each thread now preads its byte range in 512 KB pieces into one buffer it keeps reusing, and carries the partial last line over to the next read. Endpoint names get copied out the first time a thread sees them, since the buffer gets overwritten.
 - Locally the median went from 70 ms to 58 ms. On the board it is 65 to 61 ms, with 5 MB more for the buffers.
 
+## Round 5
+
+- Profile on 8 threads: parse 22 ms, endpoint ids 4 ms, hours and output 11 ms. The board's memory is anonymous memory plus the 10 MB summary.txt in the page cache, so freeing rows while the output grows counts.
+- glibc kept every 16 KB row block in its thread arenas. With M_MMAP_THRESHOLD just under 16 KB each block is its own mapping, and each hour's blocks are dropped as soon as the hour is done. The local anonymous peak went from 25 MB to 17 MB.
+
 ## Next ideas
 
 Radix sort per hour, and a faster integer formatter for the output.
