@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 use std::hash::Hasher;
 use std::io::Write;
 
@@ -24,11 +24,20 @@ fn fx(b: &[u8]) -> u64 { let mut h = Fx(0); h.write(b); h.finish() }
 struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
 impl Agg { fn new() -> Self { Agg { count: 0, id_sum: 0, sum: 0, min: i64::MAX, max: i64::MIN, name_bytes: 0, note_bytes: 0 } } }
 
-// index of the first byte equal to `c`, eight bytes at a time
+// index of the first byte equal to `c`: SSE2, 16 bytes at a time, then eight at a time near the end
 #[inline]
 fn find(b: &[u8], c: u8) -> usize {
-    let pat = 0x0101010101010101u64 * c as u64;
+    use std::arch::x86_64::*;
     let mut i = 0;
+    unsafe {
+        let pat = _mm_set1_epi8(c as i8);
+        while i + 16 <= b.len() {
+            let m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(b.as_ptr().add(i) as *const __m128i), pat));
+            if m != 0 { return i + m.trailing_zeros() as usize; }
+            i += 16;
+        }
+    }
+    let pat = 0x0101010101010101u64 * c as u64;
     while i + 8 <= b.len() {
         let x = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) ^ pat;
         let z = x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080;
@@ -108,12 +117,15 @@ fn main() {
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
     const SLOTS: usize = 1 << 18; // the name pool is 100,000 per the spec
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    // the raw bytes of names up to 16 long sit next to the table, so a hit compares two
+    // words instead of reading the first occurrence back from somewhere in the file
+    let inl: Vec<[AtomicU64; 2]> = (0..SLOTS).map(|_| [AtomicU64::new(0), AtomicU64::new(0)]).collect();
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
-            let (lookup, table, seen) = (&lookup, &table, &seen);
+            let (lookup, table, seen, inl) = (&lookup, &table, &seen, &inl);
             sc.spawn(move || {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
@@ -144,15 +156,34 @@ fn main() {
                     let name = &c[ns..ne];
                     let h = fx(name);
                     let me = (h >> 48) << 48 | (name.len() as u64) << 32 | (ns as u64 + 1);
+                    let short = name.len() <= 16;
+                    let (w0, w1) = if short {
+                        let mut t = [0u8; 16];
+                        t[..name.len()].copy_from_slice(name);
+                        (u64::from_le_bytes(t[..8].try_into().unwrap()), u64::from_le_bytes(t[8..].try_into().unwrap()))
+                    } else { (0, 0) };
+                    const PENDING: u64 = 1; // a claimed slot whose inline bytes are not out yet
                     let mut j = h as usize & (SLOTS - 1);
                     loop {
-                        let cur = table[j].load(Relaxed);
-                        let cur = if cur == 0 {
-                            match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) => v }
-                        } else { cur };
+                        let mut cur = table[j].load(Acquire);
+                        if cur == 0 {
+                            match table[j].compare_exchange(0, PENDING, Acquire, Acquire) {
+                                Ok(_) => {
+                                    inl[j][0].store(w0, Relaxed); inl[j][1].store(w1, Relaxed);
+                                    table[j].store(me, Release);
+                                    break;
+                                }
+                                Err(v) => cur = v,
+                            }
+                        }
+                        while cur == PENDING { std::hint::spin_loop(); cur = table[j].load(Acquire); }
                         if cur >> 48 == me >> 48 && (cur >> 32 & 0xFFFF) == name.len() as u64 {
-                            let o = (cur & 0xFFFF_FFFF) as usize - 1;
-                            if &c[o..o + name.len()] == name { break; }
+                            if short {
+                                if inl[j][0].load(Relaxed) == w0 && inl[j][1].load(Relaxed) == w1 { break; }
+                            } else {
+                                let o = (cur & 0xFFFF_FFFF) as usize - 1;
+                                if &c[o..o + name.len()] == name { break; }
+                            }
                         }
                         j = (j + 1) & (SLOTS - 1);
                     }

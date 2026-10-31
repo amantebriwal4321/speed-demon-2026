@@ -275,11 +275,35 @@ fn main() {
 
     fn dl(p: &Part, t: u32) -> &[u32] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
 
+    // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
+    // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
+    let maxdoc = parts.iter().filter_map(|p| (p.start.len() > 1).then(|| p.lo + p.start.len() as u32 - 2)).max().unwrap_or(0) as usize;
+    let nw = maxdoc / 64 + 1;
+    let use_bits = maxdoc < 1 << 26;
+    // terms in more than 1 doc in 32 also get a ready made bitset (a few MB in all), so an op
+    // on them is a word wise pass instead of a walk over a long list
+    let tlen = |t: usize| parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>();
+    let dense: Vec<u32> = if use_bits { (0..nterm).filter(|&t| tlen(t) > 2 * nw).map(|t| t as u32).collect() } else { Vec::new() };
+    let mut bslot = vec![u32::MAX; nterm];
+    for (i, &t) in dense.iter().enumerate() { bslot[t as usize] = i as u32; }
+    let mut bits = vec![0u64; dense.len() * nw];
+    std::thread::scope(|sc| {
+        let per = dense.len().div_ceil(nt).max(1);
+        for (ch, ts) in bits.chunks_mut(per * nw).zip(dense.chunks(per)) {
+            let parts = &parts;
+            sc.spawn(move || for (b, &t) in ch.chunks_mut(nw).zip(ts) {
+                for p in parts { for &d in dl(p, t) { b[d as usize >> 6] |= 1 << (d & 63); } }
+            });
+        }
+    });
+    let bs = |t: u32| { let i = bslot[t as usize]; (i != u32::MAX).then(|| &bits[i as usize * nw..(i as usize + 1) * nw]) };
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
         for _ in 0..nt {
-            sc.spawn(|| loop {
+            sc.spawn(|| {
+            let (mut acc, mut tmp) = (Vec::<u64>::new(), Vec::<u64>::new());
+            loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 if k >= qs.len() { break; }
                 // parts cover disjoint, ascending doc ranges, so each query runs per part
@@ -291,7 +315,46 @@ fn main() {
                     sum += x.iter().map(|&d| d as u64).sum::<u64>();
                     for &d in x.iter().take(10 - r.len()) { r.push(d); }
                 };
-                for p in &parts {
+                let big = use_bits && match &qs[k] {
+                    Q::Bool(v) => v.iter().map(|&(_, t)| parts.iter().map(|p| dl(p, t).len()).sum::<usize>()).sum::<usize>() > 2 * nw,
+                    _ => false,
+                };
+                if big {
+                    if acc.is_empty() { acc = vec![0; nw]; tmp = vec![0; nw]; }
+                    let Q::Bool(v) = &qs[k] else { unreachable!() };
+                    match bs(v[0].1) {
+                        Some(b) => acc.copy_from_slice(b),
+                        None => for p in &parts { for &d in dl(p, v[0].1) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                    }
+                    for &(op, t) in &v[1..] {
+                        if let Some(b) = bs(t) {
+                            match op {
+                                1 => for (a, &x) in acc.iter_mut().zip(b) { *a &= x },
+                                2 => for (a, &x) in acc.iter_mut().zip(b) { *a |= x },
+                                _ => for (a, &x) in acc.iter_mut().zip(b) { *a &= !x },
+                            }
+                            continue;
+                        }
+                        match op {
+                            1 => {
+                                for p in &parts { for &d in dl(p, t) { if acc[d as usize >> 6] >> (d & 63) & 1 == 1 { tmp[d as usize >> 6] |= 1 << (d & 63); } } }
+                                std::mem::swap(&mut acc, &mut tmp);
+                                tmp.fill(0);
+                            }
+                            2 => for p in &parts { for &d in dl(p, t) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                            _ => for p in &parts { for &d in dl(p, t) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
+                        }
+                    }
+                    for (w, x) in acc.iter_mut().enumerate() {
+                        let mut b = *x;
+                        if b == 0 { continue; }
+                        *x = 0;
+                        let (mut one, mut m) = ([0u32; 64], 0);
+                        while b != 0 { one[m] = (w * 64) as u32 + b.trailing_zeros(); m += 1; b &= b - 1; }
+                        add(&one[..m]);
+                    }
+                }
+                for p in parts.iter().filter(|_| !big) {
                     match &qs[k] {
                         Q::Bool(v) => {
                             let mut x = dl(p, v[0].1).to_vec();
@@ -326,7 +389,7 @@ fn main() {
                 for x in r.iter().take(10) { write!(o, " {x}").unwrap(); }
                 o.push(b'\n');
                 res[k].set(o).ok();
-            });
+            }});
         }
     });
     let mut o = Vec::new();

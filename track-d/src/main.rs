@@ -15,41 +15,43 @@ fn num(b: &[u8], i: &mut usize) -> u32 {
 // array over all nodes for every thread. Values are u32, with the rare one above 2^32 - 3
 // kept in a side map.
 const SPILL: u32 = u32::MAX - 1;
-const EMPTY: u32 = u32::MAX;
-struct Dist { keys: Vec<u32>, vals: Vec<u32>, len: usize, big: std::collections::HashMap<u32, u64> }
+// slot = node << 32 | dist, all ones when empty: key and value share one load
+struct Dist { t: Vec<u64>, len: usize, big: std::collections::HashMap<u32, u64> }
+const E: u64 = u64::MAX;
 impl Dist {
-    fn new(_n: usize) -> Self { Dist { keys: vec![EMPTY; 1 << 14], vals: vec![0; 1 << 14], len: 0, big: Default::default() } }
+    fn new(_n: usize) -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default() } }
     #[inline]
     fn slot(&self, v: u32) -> usize {
-        let m = self.keys.len() - 1;
+        let m = self.t.len() - 1;
         let mut i = (v.wrapping_mul(0x9E3779B1) as usize >> 4) & m;
         loop {
-            let k = self.keys[i];
-            if k == v || k == EMPTY { return i; }
+            let k = self.t[i];
+            if k == E || (k >> 32) as u32 == v { return i; }
             i = (i + 1) & m;
         }
     }
     #[inline]
     fn get(&self, v: u32) -> u64 {
-        let i = self.slot(v);
-        if self.keys[i] == EMPTY { return u64::MAX; }
-        match self.vals[i] { SPILL => self.big[&v], x => x as u64 }
+        let k = self.t[self.slot(v)];
+        if k == E { return u64::MAX; }
+        match k as u32 { SPILL => self.big[&v], x => x as u64 }
     }
     #[inline]
     fn set(&mut self, v: u32, d: u64) {
         let mut i = self.slot(v);
-        if self.keys[i] == EMPTY {
-            if (self.len + 1) * 2 > self.keys.len() { self.grow(); i = self.slot(v); }
-            self.keys[i] = v; self.len += 1;
+        if self.t[i] == E {
+            if (self.len + 1) * 2 > self.t.len() { self.grow(); i = self.slot(v); }
+            self.len += 1;
         }
-        if d < SPILL as u64 { self.vals[i] = d as u32; } else { self.vals[i] = SPILL; self.big.insert(v, d); }
+        let x = if d < SPILL as u64 { d as u32 } else { self.big.insert(v, d); SPILL };
+        self.t[i] = (v as u64) << 32 | x as u64;
     }
     fn grow(&mut self) {
-        let c = self.keys.len() * 2;
-        let (ok, ov) = (std::mem::replace(&mut self.keys, vec![EMPTY; c]), std::mem::replace(&mut self.vals, vec![0; c]));
-        for (k, v) in ok.into_iter().zip(ov) { if k != EMPTY { let i = self.slot(k); self.keys[i] = k; self.vals[i] = v; } }
+        let c = self.t.len() * 2;
+        let old = std::mem::replace(&mut self.t, vec![E; c]);
+        for k in old { if k != E { let i = self.slot((k >> 32) as u32); self.t[i] = k; } }
     }
-    fn clear(&mut self) { self.keys.fill(EMPTY); self.len = 0; self.big.clear(); }
+    fn clear(&mut self) { self.t.fill(E); self.len = 0; self.big.clear(); }
 }
 
 struct Ptr2(*mut (u32, u32));
