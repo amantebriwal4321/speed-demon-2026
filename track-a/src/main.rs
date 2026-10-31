@@ -7,6 +7,22 @@ fn ld8(b: &[u8], i: usize) -> u64 { unsafe { (b.as_ptr().add(i) as *const u64).r
 
 // one thread's endpoints: open addressing on (first 8 bytes, last 8 bytes, length), checked
 // against the bytes of the first occurrence, which stay in the mmap
+// one hour's rows in fixed blocks, so nothing is ever copied by a growing Vec. A row is
+// local id << 21 | is_5xx << 20 | latency; latencies from 2^20 - 1 up (about 1%) and ids past
+// 2046 go to `side` as full u64 rows instead
+const LAT_ESC: u32 = (1 << 20) - 1;
+const BLK: usize = 4096;
+struct Hr { blocks: Vec<Vec<u32>>, side: Vec<u64> }
+impl Hr {
+    #[inline(always)]
+    fn push(&mut self, x: u32) {
+        match self.blocks.last_mut() {
+            Some(b) if b.len() < BLK => b.push(x),
+            _ => { let mut b = Vec::with_capacity(BLK); b.push(x); self.blocks.push(b); }
+        }
+    }
+}
+
 struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)> }
 const TB: usize = 1 << 13;
 
@@ -28,12 +44,12 @@ fn main() {
     cuts.push(b.len());
 
     // per thread: endpoint table, and per hour rows of local id << 33 | latency << 1 | is_5xx
-    let parts: Vec<(Eps, Vec<Vec<u64>>)> = std::thread::scope(|sc| {
+    let parts: Vec<(Eps, Vec<Hr>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
                 let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new() };
-                let mut rows: Vec<Vec<u64>> = (0..HOURS).map(|_| Vec::with_capacity((hi - lo) / 70 / HOURS + 64)).collect();
+                let mut rows: Vec<Hr> = (0..HOURS).map(|_| Hr { blocks: Vec::new(), side: Vec::new() }).collect();
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
                 let mut start = lo;
@@ -95,7 +111,8 @@ fn main() {
                             if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; eq(&b[st..st + l], &c[es..ee]) }) { break x; }
                             s = (s + 1) & (TB - 1);
                         };
-                        unsafe { rows.get_unchecked_mut(hour) }.push((id as u64) << 33 | v << 1 | five as u64);
+                        let r = unsafe { rows.get_unchecked_mut(hour) };
+                        if v < LAT_ESC as u64 && id < 2047 { r.push(id << 21 | (five as u32) << 20 | v as u32); } else { r.side.push((id as u64) << 33 | v << 1 | five as u64); }
                     }
                     blk += 64;
                 }
@@ -110,12 +127,16 @@ fn main() {
     all.sort_unstable(); all.dedup();
     let ne = all.len();
     let maps: Vec<Vec<u32>> = parts.iter().map(|(e, _)| e.start.iter().zip(&e.len).map(|(&s, &l)| all.binary_search(&&b[s as usize..(s + l) as usize]).unwrap() as u32).collect()).collect();
-    let parts: Vec<std::sync::Mutex<Vec<Vec<u64>>>> = parts.into_iter().map(|(_, r)| std::sync::Mutex::new(r)).collect();
+    let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(|(_, r)| std::sync::Mutex::new(r)).collect();
     let _ = &parts;
-    let rows_of = |pi: usize, h: usize| std::mem::take(&mut parts[pi].lock().unwrap()[h]);
+    let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });
 
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..HOURS).map(|_| Default::default()).collect();
+    // hours get written in order as soon as they and every hour before them are done, so
+    // only a few finished hours ever wait in memory
+    std::fs::create_dir_all(&out).ok();
+    let file = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
+    let wr: std::sync::Mutex<(usize, Vec<Option<Vec<u8>>>, &std::fs::File)> = std::sync::Mutex::new((0, (0..HOURS).map(|_| None).collect(), &file));
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
@@ -126,17 +147,25 @@ fn main() {
                     if h >= HOURS { break; }
                     let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][(h + 18) / 24];
                     let hh = (h + 18) % 24;
-                    let rs: Vec<Vec<u64>> = (0..maps.len()).map(|pi| rows_of(pi, h)).collect();
+                    let rs: Vec<Hr> = (0..maps.len()).map(|pi| rows_of(pi, h)).collect();
                     // counting sort by global endpoint id, keeping latency << 1 | is_5xx
                     cnt.fill(0);
-                    for (pi, r) in rs.iter().enumerate() { for &x in r { cnt[maps[pi][(x >> 33) as usize] as usize + 1] += 1; } }
+                    for (pi, r) in rs.iter().enumerate() {
+                        let m = &maps[pi];
+                        for b in &r.blocks { for &x in b { cnt[m[(x >> 21) as usize] as usize + 1] += 1; } }
+                        for &x in &r.side { cnt[m[(x >> 33) as usize] as usize + 1] += 1; }
+                    }
                     for g in 0..ne { cnt[g + 1] += cnt[g]; }
                     let total = cnt[ne] as usize;
                     buf.clear(); buf.resize(total, 0);
                     let mut cur = cnt.clone();
                     for (pi, r) in rs.iter().enumerate() {
                         let m = &maps[pi];
-                        for &x in r { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = x & 0x1_FFFF_FFFF; cur[g] += 1; }
+                        for b in &r.blocks { for &x in b {
+                            let g = m[(x >> 21) as usize] as usize;
+                            buf[cur[g] as usize] = ((x & LAT_ESC) as u64) << 1 | (x >> 20 & 1) as u64; cur[g] += 1;
+                        } }
+                        for &x in &r.side { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = x & 0x1_FFFF_FFFF; cur[g] += 1; }
                     }
                     std::mem::forget(rs); // freeing costs time, and the peak is already reached
                     let mut o = Vec::with_capacity(ne * 48);
@@ -170,14 +199,18 @@ fn main() {
                         for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
                         o.push(b'\n');
                     }
-                    *slots[h].lock().unwrap() = o;
+                    let mut w = wr.lock().unwrap();
+                    w.1[h] = Some(o);
+                    while w.0 < HOURS {
+                        let k = w.0;
+                        let Some(x) = w.1[k].take() else { break };
+                        (&*w.2).write_all(&x).unwrap();
+                        w.0 += 1;
+                    }
                 }
             });
         }
     });
-    std::fs::create_dir_all(&out).ok();
-    let mut f = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
-    for l in &slots { f.write_all(&l.lock().unwrap()).unwrap(); }
     std::process::exit(0);
 }
 
