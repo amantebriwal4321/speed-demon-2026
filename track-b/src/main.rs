@@ -18,23 +18,34 @@ impl Hasher for Fx {
 }
 type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
-const NONE: u16 = u16::MAX;
-const WIDE: u16 = u16::MAX - 1;
 
-fn phrase_ids<'a>(p: &'a Part, d: usize) -> impl Iterator<Item = u32> + 'a {
-    p.stream[p.start[d] as usize..p.start[d + 1] as usize].iter().filter(|&&t| t < WIDE).map(|&t| t as u32)
+// key of a token over 16 bytes: its hash with the top bit set, which no packed token has
+fn long(h: u64) -> u128 { 1 << 127 | h as u128 }
+fn has(docs: &[u8], mut i: usize, ks: &[u128]) -> bool {
+    let (n, mut ring, mut seen) = (ks.len(), [0u128; 8], 0usize); // last 8 tokens, tokens seen
+    let (mut o, mut tm, mut nm) = (64, 0u64, 0u64);
+    loop {
+        if o >= 64 { (tm, nm) = masks(docs, i); o = 0; }
+        let bits = (tm | nm) >> o;
+        if bits == 0 { i += 64 - o; o = 64; continue; }
+        let z = bits.trailing_zeros() as usize;
+        i += z; o += z;
+        if nm >> o & 1 == 1 { return false; }
+        let s = i;
+        let run = (!(tm >> o)).trailing_zeros() as usize;
+        i += run; o += run;
+        if o >= 64 { while docs[i].is_ascii_alphanumeric() { i += 1; } o = 64; }
+        let l = i - s;
+        let t = if l > 16 { long(docs[s..i].iter().fold(0, |h, &x| (h ^ x.to_ascii_lowercase() as u64).wrapping_mul(0x100000001b3))) } else { pack(&docs[s..], l) };
+        ring[seen & 7] = t;
+        seen += 1;
+        if t == ks[n - 1] && seen >= n && (0..n).all(|j| ring[(seen - n + j) & 7] == ks[j]) { return true; }
+    }
 }
 
-// term ids of one doc's tokens, from its text (u32::MAX for tokens no query uses)
-fn retok(b: &[u8], lookup: &dyn Fn(&[u8]) -> Option<u32>) -> Vec<u32> {
-    let end = b.iter().position(|&c| c == b'\n').unwrap_or(b.len());
-    b[..end].split(|c| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty())
-        .map(|t| lookup(&t.to_ascii_lowercase()).unwrap_or(u32::MAX)).collect()
-}
+struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, extra: Vec<u32>, xstart: Vec<u32>, doff: Vec<u32> }
 
-struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, stream: Vec<u16>, start: Vec<u32>, extra: Vec<u32>, xstart: Vec<u32>, doff: Vec<u32> }
-
-enum Q { Bool(Vec<(u8, u32)>), Phrase(Vec<u32>) } // op: 0 first, 1 AND, 2 OR, 3 NOT
+enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<u128>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
 
 // does sorted b contain x, searching forward from *j (galloping); moves *j along
 fn seek(b: &[u32], j: &mut usize, x: u32) -> bool {
@@ -122,11 +133,6 @@ fn main() {
     // queries first: only the terms they use get indexed
     let mut ids: FxMap<&[u8], u32> = FxMap::default();
     let mut qs = Vec::new();
-    // phrase terms take the low ids so the token stream can be u16
-    for line in qb.split(|&c| c == b'\n') {
-        if line.starts_with(b"PHRASE ") { for t in line[8..line.len() - 1].split(|&c| c == b' ') { term(&mut ids, t); } }
-    }
-    let np = ids.len() as u32; // ids below np are phrase terms
     for line in qb.split(|&c| c == b'\n') {
         if line.is_empty() { continue; }
         if line.starts_with(b"BOOL ") {
@@ -139,13 +145,27 @@ fn main() {
             qs.push(Q::Bool(v));
         } else {
             let inner = &line[8..line.len() - 1];
-            qs.push(Q::Phrase(inner.split(|&c| c == b' ').map(|t| term(&mut ids, t)).collect()));
+            let w: Vec<&[u8]> = inner.split(|&c| c == b' ').collect();
+            qs.push(Q::Phrase((w.iter().map(|t| term(&mut ids, t)).collect(), w.iter().map(|t| if t.len() > 16 { long(t.iter().fold(0, |h, &x| (h ^ x as u64).wrapping_mul(0x100000001b3))) } else { pack(t, t.len()) }).collect())));
         }
     }
     let nterm = ids.len();
+    // adjacent pairs of phrase terms get their own doc lists: they answer two term phrases
+    // outright and leave very few docs for longer ones to check
+    let mut pairs: FxMap<u64, u32> = FxMap::default();
+    for q in &qs { if let Q::Phrase((ts, _)) = q { for w in ts.windows(2) { let n = (nterm + pairs.len()) as u32; pairs.entry((w[0] as u64 + 1) << 32 | w[1] as u64).or_insert(n); } } }
+    let nall = nterm + pairs.len();
+    let bcap = (pairs.len() * 2).next_power_of_two().max(16);
+    let bsh = 64 - bcap.trailing_zeros();
+    let (mut bk, mut bv) = (vec![0u64; bcap], vec![0u32; bcap]);
+    for (&k, &v) in &pairs {
+        let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
+        while bk[j] != 0 { j = (j + 1) & (bcap - 1); }
+        bk[j] = k; bv[j] = v;
+    }
     // open addressing table from a token packed into a u128 (tokens of 16 bytes or less)
     // to its term id; longer query terms go to a small fallback map
-    let cap = (nterm * 4).next_power_of_two().max(16);
+    let cap = (nterm * 2).next_power_of_two().max(16);
     let shift = 128 - cap.trailing_zeros();
     let mut keys = vec![0u128; cap];
     let mut vals = vec![0u32; cap];
@@ -166,13 +186,6 @@ fn main() {
         filt[fb >> 6] |= 1 << (fb & 63);
     }
 
-    let lookup = |t: &[u8]| -> Option<u32> {
-        if t.len() > 16 { return long.get(t).copied(); }
-        let k = pack(t, t.len());
-        let mut j = h(k);
-        loop { let x = keys[j]; if x == k { return Some(vals[j]); } if x == 0 { return None; } j = (j + 1) & (cap - 1); }
-    };
-    //MARK
     let docs = map(&format!("{data}/docs.txt"));
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let mut cuts = vec![0usize];
@@ -194,19 +207,19 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, filt) = (&keys, &vals, &long, &lower, &filt);
+            let (keys, vals, long, lower, filt, bk, bv) = (&keys, &vals, &long, &lower, &filt, &bk, &bv);
             sc.spawn(move || {
-                let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), stream: Vec::with_capacity(c.len() / 6), start: Vec::new(), extra: Vec::new(), xstart: Vec::new(), doff: Vec::new() };
-                let mut last = vec![u32::MAX; nterm];
+                let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), extra: Vec::new(), xstart: Vec::new(), doff: Vec::new() };
+                let mut last = vec![u32::MAX; nall];
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
+                    let mut prev = u32::MAX;
                     while c[i] != b'\t' { doc = doc * 10 + (c[i] - b'0') as u32; i += 1; }
                     if p.lo == u32::MAX { p.lo = doc; }
-                    p.start.push(p.stream.len() as u32);
                     p.xstart.push(p.extra.len() as u32);
                     p.doff.push((base + i) as u32);
-                    let d = p.start.len() as u32 - 1;
+                    let d = p.doff.len() as u32 - 1;
                     i += 1;
                     // token and LF bitmasks of a 64 byte window, then walk the bits
                     let mut o = 64; // offset inside the current window, 64 = need a new one
@@ -234,41 +247,30 @@ fn main() {
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
                             long.get(&t[..l]).copied()
                         } else { None };
-                        // stream: phrase term ids, NONE for anything else, WIDE for a phrase id
-                        // that does not fit (then the doc text decides). Other query terms
-                        // only need presence, so they go to the per doc extra list once.
-                        match id {
-                            Some(t) if t < WIDE as u32 => p.stream.push(t as u16),
-                            Some(t) => { p.stream.push(if t < np { WIDE } else { NONE }); if last[t as usize] != d { last[t as usize] = d; p.extra.push(t); } }
-                            None => p.stream.push(NONE),
+                        if let Some(t) = id {
+                            if last[t as usize] != d { last[t as usize] = d; p.extra.push(t); }
+                            if prev != u32::MAX {
+                                let k = (prev as u64 + 1) << 32 | t as u64;
+                                let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
+                                while bk[j] != 0 {
+                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; p.extra.push(b); } break; }
+                                    j = (j + 1) & (bcap - 1);
+                                }
+                            }
                         }
+                        prev = id.unwrap_or(u32::MAX);
                     }
                     i += 1;
                 }
-                p.start.push(p.stream.len() as u32);
                 p.xstart.push(p.extra.len() as u32);
                 // doc lists by counting sort over the stream: count, prefix, fill. Sequential
                 // reads of the stream, and only small per term arrays get random access
-                last.fill(u32::MAX);
-                let mut cnt = vec![0u32; nterm + 1];
-                for d in 0..p.start.len() - 1 {
-                    for t in phrase_ids(&p, d) {
-                        if last[t as usize] != d as u32 { last[t as usize] = d as u32; cnt[t as usize + 1] += 1; }
-                    }
-                    for &t in &p.extra[p.xstart[d] as usize..p.xstart[d + 1] as usize] { cnt[t as usize + 1] += 1; }
-                }
-                for t in 0..nterm { cnt[t + 1] += cnt[t]; }
+                let mut cnt = vec![0u32; nall + 1];
+                for &t in &p.extra { cnt[t as usize + 1] += 1; }
+                for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut cur = cnt.clone();
-                let mut lists = vec![0u32; cnt[nterm] as usize];
-                last.fill(u32::MAX);
-                for d in 0..p.start.len() - 1 {
-                    for t in phrase_ids(&p, d) {
-                        if last[t as usize] != d as u32 {
-                            last[t as usize] = d as u32;
-                            lists[cur[t as usize] as usize] = p.lo + d as u32;
-                            cur[t as usize] += 1;
-                        }
-                    }
+                let mut lists = vec![0u32; cnt[nall] as usize];
+                for d in 0..p.doff.len() {
                     for &t in &p.extra[p.xstart[d] as usize..p.xstart[d + 1] as usize] {
                         lists[cur[t as usize] as usize] = p.lo + d as u32;
                         cur[t as usize] += 1;
@@ -286,14 +288,14 @@ fn main() {
 
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
     // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
-    let maxdoc = parts.iter().filter_map(|p| (p.start.len() > 1).then(|| p.lo + p.start.len() as u32 - 2)).max().unwrap_or(0) as usize;
+    let maxdoc = parts.iter().filter_map(|p| (!p.doff.is_empty()).then(|| p.lo + p.doff.len() as u32 - 1)).max().unwrap_or(0) as usize;
     let nw = maxdoc / 64 + 1;
     let use_bits = maxdoc < 1 << 26;
     // terms in more than 1 doc in 32 also get a ready made bitset (a few MB in all), so an op
     // on them is a word wise pass instead of a walk over a long list
     let tlen = |t: usize| parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>();
-    let dense: Vec<u32> = if use_bits { (0..nterm).filter(|&t| tlen(t) > 2 * nw).map(|t| t as u32).collect() } else { Vec::new() };
-    let mut bslot = vec![u32::MAX; nterm];
+    let dense: Vec<u32> = if use_bits { (0..nall).filter(|&t| tlen(t) > 2 * nw).map(|t| t as u32).collect() } else { Vec::new() };
+    let mut bslot = vec![u32::MAX; nall];
     for (i, &t) in dense.iter().enumerate() { bslot[t as usize] = i as u32; }
     let mut bits = vec![0u64; dense.len() * nw];
     std::thread::scope(|sc| {
@@ -372,23 +374,13 @@ fn main() {
                             }
                             add(&x);
                         }
-                        Q::Phrase(ts) => {
-                            // docs holding the two rarest terms, then an int compare scan of each
-                            let mut order: Vec<u32> = ts.clone();
+                        Q::Phrase((ts, ks)) => {
+                            // docs holding every term, then the doc text decides
+                            let mut order: Vec<u32> = ts.windows(2).map(|w| pairs[&((w[0] as u64 + 1) << 32 | w[1] as u64)]).collect();
                             order.sort_by_key(|&t| dl(p, t).len());
-                            let n = ts.len();
-                            let wide = ts.iter().any(|&t| t >= WIDE as u32);
-                            let ts16: Vec<u16> = ts.iter().map(|&t| if t >= WIDE as u32 { WIDE } else { t as u16 }).collect();
-                            let mut hit = and(dl(p, order[0]), dl(p, order[1]));
-                            hit.retain(|&d| {
-                                let i = (d - p.lo) as usize;
-                                let toks = &p.stream[p.start[i] as usize..p.start[i + 1] as usize];
-                                if !wide { return toks.windows(n).any(|w| w == &ts16[..]); }
-                                // rare: a phrase id past u16, so retokenize this doc's text
-                                if !toks.windows(n).any(|w| w == &ts16[..]) { return false; }
-                                let full = retok(&docs[p.doff[i] as usize..], &lookup);
-                                full.windows(n).any(|w| w == &ts[..])
-                            });
+                            let mut hit = dl(p, order[0]).to_vec();
+                            for &t in &order[1..] { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
+                            if ts.len() > 2 { hit.retain(|&d| has(docs, p.doff[(d - p.lo) as usize] as usize, ks)); }
                             add(&hit);
                         }
                     }
