@@ -27,8 +27,6 @@ impl Dist {
     }
 }
 
-struct Ptr(*mut u64);
-unsafe impl Sync for Ptr {}
 struct Ptr2(*mut (u32, u32));
 unsafe impl Sync for Ptr2 {}
 
@@ -54,39 +52,57 @@ fn main() {
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let ct = cuts(body, nt);
 
-    // pass 1, in parallel: parse edges into per thread lists and count out degrees
-    let deg: Vec<AtomicU32> = (0..n + 1).map(|_| AtomicU32::new(0)).collect();
-    let parts: Vec<Vec<[u32; 3]>> = std::thread::scope(|sc| {
+    // parse in parallel, sorting each edge into a bucket by its tail's node range; then each
+    // bucket's thread builds the CSR for its own node range, with no atomics
+    // bucket of node a is a * nt / n, so bucket b holds nodes ceil(b * n / nt) .. ceil((b + 1) * n / nt)
+    let range = |b: usize| ((b * n + nt - 1) / nt, ((b + 1) * n + nt - 1) / nt);
+    let parts: Vec<Vec<Vec<[u32; 3]>>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
-            let (c, deg) = (&body[ct[k]..ct[k + 1]], &deg);
+            let c = &body[ct[k]..ct[k + 1]];
             sc.spawn(move || {
-                let mut v = Vec::with_capacity(c.len() / 15);
+                let mut v = vec![Vec::with_capacity(c.len() / 15 / nt + 16); nt];
                 let mut j = 0;
                 while j < c.len() {
                     let (a, b, w) = (num(c, &mut j), num(c, &mut j), num(c, &mut j));
-                    if a != b { deg[a as usize].fetch_add(1, Relaxed); v.push([a, b, w]); } // self loops never help
+                    if a != b { v[(a as u64 * nt as u64 / n as u64) as usize].push([a, b, w]); } // self loops never help
                 }
                 v
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    let sizes: Vec<usize> = (0..nt).map(|b| parts.iter().map(|p| p[b].len()).sum()).collect();
+    let total: usize = sizes.iter().sum();
     let mut off = vec![0u32; n + 1];
-    for k in 0..n { off[k + 1] = off[k] + deg[k].load(Relaxed); }
-    let cur: Vec<AtomicU32> = off[..n].iter().map(|&x| AtomicU32::new(x)).collect();
-    let total = off[n] as usize;
     let mut adj: Vec<u64> = vec![0; total];
-    let ap = Ptr(adj.as_mut_ptr());
-    std::thread::scope(|sc| {
-        for p in &parts {
-            let (cur, ap) = (&cur, &ap);
-            // every slot index comes from a unique fetch_add, so no two writes alias
-            sc.spawn(move || for e in p {
-                let s = cur[e[0] as usize].fetch_add(1, Relaxed);
-                unsafe { *ap.0.add(s as usize) = (e[1] as u64) << 32 | e[2] as u64 };
-            });
+    {
+        let (mut orest, mut arest): (&mut [u32], &mut [u64]) = (&mut off[..n], &mut adj);
+        let mut jobs = Vec::new();
+        let mut base = 0u32;
+        for b in 0..nt {
+            let (lo, hi) = range(b);
+            let (o, r) = orest.split_at_mut(hi - lo); orest = r;
+            let (a, r) = arest.split_at_mut(sizes[b]); arest = r;
+            jobs.push((b, lo, o, a, base)); base += sizes[b] as u32;
         }
-    });
+        std::thread::scope(|sc| {
+            for (b, lo, o, a, base) in jobs {
+                let parts = &parts;
+                sc.spawn(move || {
+                    for p in parts { for e in &p[b] { o[e[0] as usize - lo] += 1; } }
+                    let mut acc = 0u32;
+                    for x in o.iter_mut() { let d = *x; *x = acc; acc += d; }
+                    let mut cur: Vec<u32> = o.to_vec();
+                    for p in parts { for e in &p[b] {
+                        let s = &mut cur[e[0] as usize - lo];
+                        a[*s as usize] = (e[1] as u64) << 32 | e[2] as u64; *s += 1;
+                    } }
+                    for x in o.iter_mut() { *x += base; }
+                });
+            }
+        });
+    }
+    off[n] = total as u32;
     drop(parts);
 
     // relabel nodes in BFS order so graph neighbours sit close in memory. Each thread grows

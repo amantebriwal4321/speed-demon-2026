@@ -52,7 +52,7 @@ fn main() {
     }
     cuts.push(b.len());
 
-    let parts: Vec<Part> = std::thread::scope(|sc| {
+    let mut parts: Vec<Part> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &b[cuts[k]..cuts[k + 1]];
             sc.spawn(move || {
@@ -91,6 +91,12 @@ fn main() {
     all.sort_unstable(); all.dedup();
     // local id -> global id, per part
     let maps: Vec<Vec<u32>> = parts.iter().map(|p| p.eps.iter().map(|e| all.binary_search(e).unwrap() as u32).collect()).collect();
+    // hour major ownership of the rows, so each hour's rows are freed as soon as it is done
+    let hour_rows: Vec<std::sync::Mutex<Vec<Vec<u64>>>> = {
+        let mut v: Vec<Vec<Vec<u64>>> = (0..HOURS).map(|_| Vec::new()).collect();
+        for p in parts.iter_mut() { for (h, r) in p.rows.drain(..).enumerate() { v[h].push(r); } }
+        v.into_iter().map(std::sync::Mutex::new).collect()
+    };
     let lines: Vec<Vec<u8>> = {
         let next = AtomicUsize::new(0);
         let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..HOURS).map(|_| Default::default()).collect();
@@ -105,8 +111,9 @@ fn main() {
                         let hh = (h + 18) % 24;
                         // swap in the global id, then one plain sort orders by endpoint, then latency
                         buf.clear();
-                        for (pi, p) in parts.iter().enumerate() {
-                            buf.extend(p.rows[h].iter().map(|&x| (maps[pi][(x >> 33) as usize] as u64) << 33 | (x & 0x1_FFFF_FFFF)));
+                        let rows = std::mem::take(&mut *hour_rows[h].lock().unwrap());
+                        for (pi, r) in rows.into_iter().enumerate() {
+                            buf.extend(r.iter().map(|&x| (maps[pi][(x >> 33) as usize] as u64) << 33 | (x & 0x1_FFFF_FFFF)));
                         }
                         let mut o = Vec::new();
                         buf.sort_unstable();
