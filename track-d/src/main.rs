@@ -2,6 +2,23 @@ use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 fn num(b: &[u8], i: &mut usize) -> u32 {
+    // eight bytes at once: the first byte below '0' ends the number, then SWAR the digits
+    if *i + 8 <= b.len() {
+        let x = u64::from_le_bytes(b[*i..*i + 8].try_into().unwrap());
+        let d = x.wrapping_sub(0x3030303030303030);
+        let stop = (d | (d.wrapping_add(0x7676767676767676))) & 0x8080808080808080; // byte < '0' or > '9'
+        if stop != 0 {
+            let n = (stop.trailing_zeros() / 8) as usize;
+            if n > 0 {
+                let x = (d << (8 * (8 - n))) & 0x0F0F0F0F0F0F0F0F;
+                let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
+                let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
+                let x = (x * 10000 + (x >> 32)) & 0xFFFFFFFF;
+                *i += n + 1;
+                return x as u32;
+            }
+        }
+    }
     let mut v = 0u32;
     while b[*i] >= b'0' { v = v * 10 + (b[*i] - b'0') as u32; *i += 1; }
     *i += 1; // skip the separator
