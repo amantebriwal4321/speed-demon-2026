@@ -2,7 +2,7 @@
 
 All four tracks are in Rust with zero crates. Same pattern every time: read the whole input once, split it on a boundary that the spec guarantees is safe, do the work on every core without locks, merge once, write once.
 
-Local timings, 8 thread Linux box, seed 1 full datasets, best of 5 runs. Every run matched the published sha256. The solutions also match the Python reference byte for byte on sample data for seeds 7 and 42.
+Local timings (before any board run), 8 thread Linux box, seed 1 full datasets, best of 5 runs. Every run matched the published sha256. The solutions also match the Python reference byte for byte on sample data for seeds 7 and 42.
 
 | Track | Reference (s) | Local best (s) | Local median (s) | Peak RSS |
 |---|---|---|---|---|
