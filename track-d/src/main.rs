@@ -1,5 +1,3 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
@@ -241,7 +239,7 @@ fn main() {
                 // bidirectional Dijkstra: side 0 runs forward from s, side 1 backward from t
                 let mut dist = [Dist::new(n), Dist::new(n)];
                 let mut touched: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
-                let mut heap: [BinaryHeap<Reverse<(u64, u32)>>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
+                let mut heap = [Radix::new(), Radix::new()];
                 let g = [(&off, &adj), (&roff, &radj)];
                 loop {
                     let k = next.fetch_add(1, Relaxed);
@@ -250,15 +248,15 @@ fn main() {
                     let mut best = u64::MAX;
                     if s == t { best = 0; } else {
                         for (side, x) in [(0, s), (1, t)] {
-                            dist[side].set(x, 0); touched[side].push(x); heap[side].push(Reverse((0, x)));
+                            dist[side].set(x, 0); touched[side].push(x); heap[side].push(0, x);
                         }
                         loop {
-                            let tf = heap[0].peek().map(|r| r.0 .0);
-                            let tb = heap[1].peek().map(|r| r.0 .0);
+                            let tf = heap[0].min();
+                            let tb = heap[1].min();
                             let (Some(tf), Some(tb)) = (tf, tb) else { break };
                             if tf.saturating_add(tb) >= best { break; }
                             let side = if heap[0].len() <= heap[1].len() { 0 } else { 1 };
-                            let Reverse((d, u)) = heap[side].pop().unwrap();
+                            let (d, u) = heap[side].pop();
                             if d > dist[side].get(u) { continue; }
                             let (o, a) = g[side];
                             let [df, db] = &mut dist;
@@ -271,7 +269,7 @@ fn main() {
                                 if nd < dv {
                                     if dv == u64::MAX { touched[side].push(v); }
                                     mine.set_at(i, v, nd);
-                                    heap[side].push(Reverse((nd, v)));
+                                    heap[side].push(nd, v);
                                     let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }
                                 }
@@ -307,4 +305,32 @@ fn map(path: &str) -> &'static [u8] {
     if len == 0 { return &[]; }
     let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+}
+
+// radix heap: Dijkstra only ever pushes keys at or above the last one popped, so a key goes in
+// the bucket of the highest bit where it differs from that last key, and a pop only
+// redistributes the lowest non-empty bucket
+struct Radix { last: u64, len: usize, b: Vec<Vec<(u64, u32)>> }
+impl Radix {
+    fn new() -> Self { Radix { last: 0, len: 0, b: (0..65).map(|_| Vec::new()).collect() } }
+    #[inline]
+    fn idx(&self, k: u64) -> usize { 64 - (k ^ self.last).leading_zeros() as usize }
+    #[inline]
+    fn push(&mut self, k: u64, v: u32) { let i = self.idx(k); self.b[i].push((k, v)); self.len += 1; }
+    fn len(&self) -> usize { self.len }
+    // make bucket 0 (keys equal to last) non-empty, if anything is left
+    #[inline]
+    fn fill(&mut self) {
+        if !self.b[0].is_empty() || self.len == 0 { return; }
+        let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
+        let v = std::mem::take(&mut self.b[i]);
+        self.last = v.iter().map(|x| x.0).min().unwrap();
+        for &(k, x) in &v { let j = self.idx(k); self.b[j].push((k, x)); }
+        let mut v = v; v.clear(); self.b[i] = v;
+    }
+    #[inline]
+    fn min(&mut self) -> Option<u64> { self.fill(); if self.len == 0 { None } else { Some(self.last) } }
+    #[inline]
+    fn pop(&mut self) -> (u64, u32) { self.fill(); self.len -= 1; self.b[0].pop().unwrap() }
+    fn clear(&mut self) { for x in &mut self.b { x.clear(); } self.len = 0; self.last = 0; }
 }

@@ -47,6 +47,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Tried and dropped: pruning labels with nd + the other side's heap top >= best. It's correct, but best is found late, so it saved nothing.
 - Tried and dropped: wiping only the touched slots after each query instead of the whole table. No difference.
 
+## Round 6
+
+- The binary heaps are now radix heaps. Dijkstra only pushes keys at or above the last one popped, so a key goes in the bucket of the highest bit where it differs from that key, and a pop only redistributes the lowest non-empty bucket. Locally that's about 3% faster.
+
 ## Next ideas
 
 A hash based distance map per thread to cut memory, and a faster integer parser.
