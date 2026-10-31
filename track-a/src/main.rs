@@ -1,164 +1,233 @@
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[derive(Default)]
-struct Fx(u64);
-impl Hasher for Fx {
-    fn finish(&self) -> u64 { self.0 }
-    fn write(&mut self, b: &[u8]) {
-        let mut h = self.0;
-        let mut c = b.chunks_exact(8);
-        for x in &mut c { h = (h.rotate_left(5) ^ u64::from_le_bytes(x.try_into().unwrap())).wrapping_mul(0x517cc1b727220a95); }
-        for &x in c.remainder() { h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
-        self.0 = h;
-    }
-    fn write_usize(&mut self, x: usize) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
-}
-type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
 const HOURS: usize = 72; // 2026-10-30T18 .. 2026-11-02T17
 
-// index of the first LF, eight bytes at a time
-fn newline(b: &[u8]) -> usize {
-    let mut i = 0;
-    while i + 8 <= b.len() {
-        let x = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) ^ 0x0a0a0a0a0a0a0a0a;
-        let z = x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080;
-        if z != 0 { return i + (z.trailing_zeros() / 8) as usize; }
-        i += 8;
-    }
-    i + b[i..].iter().position(|&x| x == b'\n').unwrap()
-}
+#[inline(always)]
+fn ld8(b: &[u8], i: usize) -> u64 { unsafe { (b.as_ptr().add(i) as *const u64).read_unaligned() } }
 
-fn d2(b: &[u8]) -> usize { ((b[0] - b'0') * 10 + (b[1] - b'0')) as usize }
-
-// per-thread state: endpoint -> local id, and per hour a flat list of
-// (local id << 33 | latency << 1 | is_5xx). Sorting one hour's list later groups it by
-// endpoint and sorts each group's latencies in the same pass.
-struct Part { ids: FxMap<Box<[u8]>, u32>, eps: Vec<Box<[u8]>>, rows: Vec<Vec<u64>> }
+// one thread's endpoints: open addressing on (first 8 bytes, last 8 bytes, length), checked
+// against the bytes of the first occurrence, which stay in the mmap
+struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)> }
+const TB: usize = 1 << 13;
 
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    // pread into a small per thread buffer instead of an mmap: no page faults, and the
-    // buffer is reused, so the input never shows up as our memory
-    let file = std::fs::File::open(format!("{data}/requests.log")).unwrap();
-    let flen = file.metadata().unwrap().len() as usize;
-    use std::os::unix::fs::FileExt;
-    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let b = map(&format!("{data}/requests.log"));
+    // method length from its first two bytes
+    let mut mlen = vec![0u8; 1 << 16];
+    for m in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] { let m = m.as_bytes(); mlen[(m[0] as usize) << 8 | m[1] as usize] = m.len() as u8; }
+    let mlen = &mlen;
+    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(32);
     let mut cuts = vec![0usize];
     for k in 1..nt {
-        // start of the first line at or after the even split point
-        let mut p = (flen * k / nt).max(*cuts.last().unwrap());
-        if p > 0 && p < flen {
-            let mut t = [0u8; 256];
-            let r = file.read_at(&mut t, (p - 1) as u64).unwrap();
-            p += t[..r].iter().position(|&x| x == b'\n').unwrap();
-        }
-        cuts.push(p.min(flen));
+        let mut p = (b.len() * k / nt).max(*cuts.last().unwrap());
+        while p < b.len() && p > 0 && b[p - 1] != b'\n' { p += 1; }
+        cuts.push(p);
     }
-    cuts.push(flen);
+    cuts.push(b.len());
 
-    let mut parts: Vec<Part> = std::thread::scope(|sc| {
+    // per thread: endpoint table, and per hour rows of local id << 33 | latency << 1 | is_5xx
+    let parts: Vec<(Eps, Vec<Vec<u64>>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
-            let (lo, hi, file) = (cuts[k], cuts[k + 1], &file);
+            let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
-                let mut p = Part { ids: FxMap::default(), eps: Vec::new(), rows: vec![Vec::with_capacity((hi - lo) / 77 / HOURS + 64); HOURS] };
-                const CH: usize = 1 << 19;
-                let mut buf = vec![0u8; CH + 4096];
-                let (mut pos, mut have) = (lo, 0usize);
-                while pos < hi || have > 0 {
-                let r = file.read_at(&mut buf[have..have + CH.min(hi - pos)], pos as u64).unwrap();
-                pos += r; have += r;
-                let end = if pos >= hi { have } else { buf[..have].iter().rposition(|&x| x == b'\n').unwrap() + 1 };
-                let c = &buf[..end];
-                let mut i = 0;
-                while i < c.len() {
-                    let ts = &c[i..i + 27];
-                    // day offset from 2026-10-30: Oct 30 -> 0, Oct 31 -> 1, Nov 1 -> 2, Nov 2 -> 3
-                    let day = if ts[6] == b'0' { d2(&ts[8..]) - 30 } else { d2(&ts[8..]) + 1 };
-                    let hour = day * 24 + d2(&ts[11..]) - 18;
-                    // method length from its first two bytes: GET PUT POST PATCH DELETE HEAD OPTIONS
-                    let ml = match (c[i + 28], c[i + 29]) { (b'G', _) | (b'P', b'U') => 3, (b'P', b'O') | (b'H', _) => 4, (b'P', _) => 5, (b'D', _) => 6, _ => 7 };
-                    let es = i + 29 + ml;
-                    let nl = es + newline(&c[es..]);
-                    // walk back over the latency digits; the status is the 3 bytes before them
-                    let mut k = nl - 1;
-                    let mut v = 0u32;
-                    let mut mul = 1u32;
-                    while c[k] != b' ' { v += (c[k] - b'0') as u32 * mul; mul = mul.wrapping_mul(10); k -= 1; }
-                    let five = c[k - 3] == b'5';
-                    let ep = &c[es..k - 4];
-                    i = nl + 1;
-                    let n = p.ids.len() as u32;
-                    let id = match p.ids.get(ep) { Some(&x) => x, None => { p.ids.insert(ep.into(), n); p.eps.push(ep.into()); n } };
-                    p.rows[hour].push((id as u64) << 33 | (v as u64) << 1 | five as u64);
+                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new() };
+                let mut rows: Vec<Vec<u64>> = (0..HOURS).map(|_| Vec::with_capacity((hi - lo) / 70 / HOURS + 64)).collect();
+                // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
+                // so finding the next line never waits on parsing this one.
+                let mut start = lo;
+                let mut blk = lo;
+                while blk < hi {
+                    let mut m = if blk + 64 <= b.len() { lf64(b, blk) } else {
+                        let mut t = [0u8; 64];
+                        t[..b.len() - blk].copy_from_slice(&b[blk..]);
+                        lf64(&t, 0)
+                    };
+                    if blk + 64 > hi { m &= (1u64 << (hi - blk)) - 1; }
+                    while m != 0 {
+                        let lf = blk + m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        let j = start;
+                        start = lf + 1;
+                        let c = b;
+                        // 2026-MM-DDTHH: day offset from Oct 30, then the hour
+                        let ts = ld8(c, j + 5); // "MM-DDTHH" at +5 .. +12, little endian
+                        let m1 = (ts >> 8) as u8; // second month digit: '0' for Oct (10), '1' for Nov (11)
+                        let dd = (((ts >> 24) as u8 - b'0') * 10 + ((ts >> 32) as u8 - b'0')) as usize;
+                        let hh = (((ts >> 48) as u8 - b'0') * 10 + ((ts >> 56) as u8 - b'0')) as usize;
+                        let day = if m1 == b'0' { dd - 30 } else { dd + 1 };
+                        let hour = day * 24 + hh - 18;
+                        let ml = unsafe { *mlen.get_unchecked((c[j + 28] as usize) << 8 | c[j + 29] as usize) } as usize;
+                        let es = j + 29 + ml;
+                        // from the back: latency is at most 10 digits, so the space before it is in
+                        // the last 16 bytes, and the endpoint ends 4 bytes before that space
+                        let sm = sp16(c, lf - 16);
+                        let s4 = lf - 16 + (31 - sm.leading_zeros()) as usize;
+                        let ee = s4 - 4;
+                        let five = c[ee + 1] == b'5';
+                        let nd = lf - s4 - 1; // latency digits, 1 to 10
+                        let v = if nd <= 8 {
+                            // the 8 bytes ending at the LF, junk bytes in front masked off, then SWAR
+                            let x = ld8(c, lf - 8) & 0x0F0F0F0F0F0F0F0F & (u64::MAX << (8 * (8 - nd)));
+                            let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
+                            let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
+                            (x * 10000 + (x >> 32)) & 0xFFFFFFFF
+                        } else {
+                            let mut v = 0u64;
+                            for &d in &c[s4 + 1..lf] { v = v * 10 + (d - b'0') as u64; }
+                            v
+                        };
+                        let base = 0usize;
+                        let l = ee - es;
+                        let (w0, w1) = if l >= 8 { (ld8(c, es), ld8(c, ee - 8)) } else { (ld8(c, es) & ((1u64 << (8 * l)) - 1), 0) };
+                        let h = ((w0.wrapping_mul(0x9E3779B97F4A7C15) ^ w1.wrapping_mul(0xC2B2AE3D27D4EB4F) ^ (l as u64).wrapping_mul(0x165667B19E3779F9)) >> 50) as usize & (TB - 1);
+                        let mut s = h;
+                        let id = loop {
+                            let x = unsafe { *e.slot.get_unchecked(s) };
+                            if x == u32::MAX {
+                                let id = e.start.len() as u32;
+                                e.slot[s] = id; e.start.push((es + base) as u32); e.len.push(l as u32);
+                                e.key.push((w0, w1, l as u32));
+                                break id;
+                            }
+                            let k = unsafe { e.key.get_unchecked(x as usize) };
+                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; eq(&b[st..st + l], &c[es..ee]) }) { break x; }
+                            s = (s + 1) & (TB - 1);
+                        };
+                        unsafe { rows.get_unchecked_mut(hour) }.push((id as u64) << 33 | v << 1 | five as u64);
+                    }
+                    blk += 64;
                 }
-                buf.copy_within(end..have, 0); have -= end;
-                }
-                p
+                (e, rows)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    // global endpoint order is plain byte order, which is what Vec<&[u8]>::sort gives
-    let eps: Vec<Vec<Box<[u8]>>> = parts.iter_mut().map(|p| std::mem::take(&mut p.eps)).collect();
-    let mut all: Vec<&[u8]> = eps.iter().flat_map(|p| p.iter().map(|e| &e[..])).collect();
+    // global ids in byte order of the endpoint text
+    let mut all: Vec<&[u8]> = parts.iter().flat_map(|(e, _)| e.start.iter().zip(&e.len).map(|(&s, &l)| &b[s as usize..(s + l) as usize])).collect();
     all.sort_unstable(); all.dedup();
-    // local id -> global id, per part
-    let maps: Vec<Vec<u32>> = eps.iter().map(|p| p.iter().map(|e| all.binary_search(&&e[..]).unwrap() as u32).collect()).collect();
-    // hour major ownership of the rows, so each hour's rows are freed as soon as it is done
-    let hour_rows: Vec<std::sync::Mutex<Vec<Vec<u64>>>> = {
-        let mut v: Vec<Vec<Vec<u64>>> = (0..HOURS).map(|_| Vec::new()).collect();
-        for p in parts.iter_mut() { for (h, r) in p.rows.drain(..).enumerate() { v[h].push(r); } }
-        v.into_iter().map(std::sync::Mutex::new).collect()
-    };
-    let lines: Vec<Vec<u8>> = {
-        let next = AtomicUsize::new(0);
-        let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..HOURS).map(|_| Default::default()).collect();
-        std::thread::scope(|sc| {
-            for _ in 0..nt {
-                sc.spawn(|| {
-                    let mut buf: Vec<u64> = Vec::new();
-                    loop {
-                        let h = next.fetch_add(1, Ordering::Relaxed);
-                        if h >= HOURS { break; }
-                        let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][(h + 18) / 24];
-                        let hh = (h + 18) % 24;
-                        // swap in the global id, then one plain sort orders by endpoint, then latency
-                        buf.clear();
-                        let rows = std::mem::take(&mut *hour_rows[h].lock().unwrap());
-                        for (pi, r) in rows.into_iter().enumerate() {
-                            buf.extend(r.iter().map(|&x| (maps[pi][(x >> 33) as usize] as u64) << 33 | (x & 0x1_FFFF_FFFF)));
-                        }
-                        let mut o = Vec::new();
-                        buf.sort_unstable();
-                        let mut i = 0;
-                        while i < buf.len() {
-                            let g = buf[i] >> 33;
-                            let mut j = i;
-                            let mut errs = 0u64;
-                            while j < buf.len() && buf[j] >> 33 == g { errs += buf[j] & 1; j += 1; }
-                            let n = j - i;
-                            let pc = |p: usize| (buf[i + (p * n + 99) / 100 - 1] >> 1) as u32;
-                            write!(o, "{date}T{hh:02}:00:00Z ").unwrap();
-                            o.extend_from_slice(all[g as usize]);
-                            writeln!(o, " {} {} {} {} {} {}", n, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64).unwrap();
-                            i = j;
-                        }
-                        *slots[h].lock().unwrap() = o;
+    let ne = all.len();
+    let maps: Vec<Vec<u32>> = parts.iter().map(|(e, _)| e.start.iter().zip(&e.len).map(|(&s, &l)| all.binary_search(&&b[s as usize..(s + l) as usize]).unwrap() as u32).collect()).collect();
+    let parts: Vec<std::sync::Mutex<Vec<Vec<u64>>>> = parts.into_iter().map(|(_, r)| std::sync::Mutex::new(r)).collect();
+    let _ = &parts;
+    let rows_of = |pi: usize, h: usize| std::mem::take(&mut parts[pi].lock().unwrap()[h]);
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..HOURS).map(|_| Default::default()).collect();
+    std::thread::scope(|sc| {
+        for _ in 0..nt {
+            sc.spawn(|| {
+                let mut cnt = vec![0u32; ne + 1];
+                let mut buf: Vec<u64> = Vec::new();
+                loop {
+                    let h = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if h >= HOURS { break; }
+                    let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][(h + 18) / 24];
+                    let hh = (h + 18) % 24;
+                    let rs: Vec<Vec<u64>> = (0..maps.len()).map(|pi| rows_of(pi, h)).collect();
+                    // counting sort by global endpoint id, keeping latency << 1 | is_5xx
+                    cnt.fill(0);
+                    for (pi, r) in rs.iter().enumerate() { for &x in r { cnt[maps[pi][(x >> 33) as usize] as usize + 1] += 1; } }
+                    for g in 0..ne { cnt[g + 1] += cnt[g]; }
+                    let total = cnt[ne] as usize;
+                    buf.clear(); buf.resize(total, 0);
+                    let mut cur = cnt.clone();
+                    for (pi, r) in rs.iter().enumerate() {
+                        let m = &maps[pi];
+                        for &x in r { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = x & 0x1_FFFF_FFFF; cur[g] += 1; }
                     }
-                });
-            }
-        });
-        slots.into_iter().map(|m| m.into_inner().unwrap()).collect()
-    };
+                    std::mem::forget(rs); // freeing costs time, and the peak is already reached
+                    let mut o = Vec::with_capacity(ne * 48);
+                    let hdr = format!("{date}T{hh:02}:00:00Z ").into_bytes();
+                    for g in 0..ne {
+                        let (s, t) = (cnt[g] as usize, cnt[g + 1] as usize);
+                        if s == t { continue; }
+                        let grp = &mut buf[s..t];
+                        let n = grp.len();
+                        let errs: u64 = grp.iter().map(|&x| x & 1).sum();
+                        // nearest rank percentiles: three selections, each on the part right of
+                        // the one before, instead of a full sort
+                        let (r50, r95, r99) = ((50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1, (99 * n + 99) / 100 - 1);
+                        let (p50, p95, p99);
+                        if n <= 24 {
+                            grp.sort_unstable();
+                            (p50, p95, p99) = (grp[r50], grp[r95], grp[r99]);
+                        } else {
+                            let (_, &mut a, rest) = grp.select_nth_unstable(r50);
+                            p50 = a;
+                            let rest = &mut rest[..];
+                            let off = r50 + 1;
+                            let (_, &mut b2, rest2) = rest.select_nth_unstable(r95 - off);
+                            p95 = b2;
+                            let off2 = r95 + 1;
+                            p99 = if r99 == r95 { b2 } else { let (_, &mut c2, _) = rest2.select_nth_unstable(r99 - off2); c2 };
+                        }
+                        let pc = |p: usize| (match p { 50 => p50, 95 => p95, _ => p99 }) >> 1;
+                        o.extend_from_slice(&hdr);
+                        o.extend_from_slice(all[g]);
+                        for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
+                        o.push(b'\n');
+                    }
+                    *slots[h].lock().unwrap() = o;
+                }
+            });
+        }
+    });
     std::fs::create_dir_all(&out).ok();
     let mut f = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
-    for l in &lines { f.write_all(l).unwrap(); }
+    for l in &slots { f.write_all(&l.lock().unwrap()).unwrap(); }
     std::process::exit(0);
 }
 
+// equal byte strings of the same length above 16, eight bytes at a time
+#[inline(always)]
+fn eq(a: &[u8], b: &[u8]) -> bool {
+    let l = a.len();
+    let mut i = 0;
+    while i + 8 <= l { if ld8(a, i) != ld8(b, i) { return false; } i += 8; }
+    ld8(a, l - 8) == ld8(b, l - 8)
+}
+
+// decimal digits of x, two at a time
+#[inline]
+fn num(o: &mut Vec<u8>, mut x: u64) {
+    const D: &[u8; 200] = b"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+    let mut t = [0u8; 20];
+    let mut i = 20;
+    while x >= 100 { let r = (x % 100) as usize; x /= 100; i -= 2; t[i..i + 2].copy_from_slice(&D[2 * r..2 * r + 2]); }
+    if x >= 10 { i -= 2; t[i..i + 2].copy_from_slice(&D[2 * x as usize..2 * x as usize + 2]); } else { i -= 1; t[i] = b'0' + x as u8; }
+    o.extend_from_slice(&t[i..]);
+}
+
+// LFs in c[at .. at + 64]
+#[inline(always)]
+fn lf64(c: &[u8], at: usize) -> u64 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let p = c.as_ptr().add(at) as *const __m256i;
+        let lf = _mm256_set1_epi8(b'\n' as i8);
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p), lf)) as u32 as u64 | (_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p.add(1)), lf)) as u32 as u64) << 32
+    }
+}
+
+// bit i set when c[at + i] is a space
+#[inline(always)]
+fn sp16(c: &[u8], at: usize) -> u32 {
+    use std::arch::x86_64::*;
+    unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(c.as_ptr().add(at) as *const __m128i), _mm_set1_epi8(b' ' as i8))) as u32 }
+}
+
+
+
+// read-only mmap of the input; page cache pages are not charged to us
+fn map(path: &str) -> &'static [u8] {
+    use std::os::unix::io::AsRawFd;
+    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+    let f = std::fs::File::open(path).unwrap();
+    let len = f.metadata().unwrap().len() as usize;
+    if len == 0 { return &[]; }
+    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 };
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+}
