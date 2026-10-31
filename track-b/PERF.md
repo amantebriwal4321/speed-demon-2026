@@ -5,7 +5,7 @@ Local numbers are from an 8 thread Linux box, seed 1 full data, best of 5 runs, 
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 56.35 | 2,200 | 0 |
-| 1 | Rust, queries first, index only the query terms, positional postings, parallel build and parallel queries | | 0.81 local | ~920 | |
+| 1 | Rust, queries first, index only the query terms, positional postings, parallel build and parallel queries | run-a80f93dff992 | 0.798 | 989 | 46.13 |
 
 ## Why it got faster
 

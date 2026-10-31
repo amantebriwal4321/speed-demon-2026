@@ -5,7 +5,7 @@ Local numbers are from an 8 thread Linux box, seed 1 full data, best of 5 runs, 
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 14.44 | 367 | 0 |
-| 1 | Rust, hand written CSV state machine, file split on CRLF, per thread aggregates | | 0.93 local | ~480 | |
+| 1 | Rust, hand written CSV state machine, file split on CRLF, per thread aggregates | run-67fbf32e31ef | 0.702 | 517 | 28.41 |
 
 ## Why it got faster
 

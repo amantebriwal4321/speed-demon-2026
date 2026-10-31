@@ -5,7 +5,7 @@ Local numbers are from an 8 thread Linux box, seed 1 full data, best of 5 runs, 
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
-| 1 | Rust, parallel parse, CSR graph, Dijkstra with early exit, queries spread over threads | | 1.32 local | ~260 | |
+| 1 | Rust, parallel parse, CSR graph, Dijkstra with early exit, queries spread over threads | run-85a7d4602e41 | 1.647 | 338 | 41.03 |
 
 ## Why it got faster
 
