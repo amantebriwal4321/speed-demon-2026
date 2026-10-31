@@ -50,7 +50,7 @@ fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u32]) {
     for &d in x.iter().take(10 - r.len()) { r.push(d); }
 }
 
-const BLK: usize = 1 << 20; // pairs per block, each block sized up front so it never grows
+const BLK: usize = 1 << 21; // u16 entries per block, each block sized up front so it never grows
 
 struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, doff: Vec<u32> }
 
@@ -223,7 +223,7 @@ fn main() {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
                 let mut cnt = vec![0u32; nall + 1];
-                let (mut blocks, mut blk) = (Vec::new(), Vec::<u32>::with_capacity(BLK + 4096));
+                let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
@@ -233,19 +233,19 @@ fn main() {
                     // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
                     // the fill below can free each block as it goes and the peak stays low
                     if blk.len() >= BLK { blocks.push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096))); }
-                    blk.push(u32::MAX);
+                    blk.push(u16::MAX);
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
                     i += 1;
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
-                            if last[t as usize] != d { last[t as usize] = d; blk.push(t); cnt[t as usize + 1] += 1; }
+                            if last[t as usize] != d { last[t as usize] = d; put(&mut blk, t); cnt[t as usize + 1] += 1; }
                             if prev != u32::MAX {
                                 let k = (prev as u64 + 1) << 32 | t as u64;
                                 let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
                                 let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
                                 while pf[f >> 6] >> (f & 63) & 1 == 1 && bk[j] != 0 {
-                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; blk.push(b); cnt[b as usize + 1] += 1; } break; }
+                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; put(&mut blk, b); cnt[b as usize + 1] += 1; } break; }
                                     j = (j + 1) & (bcap - 1);
                                 }
                             }
@@ -295,8 +295,11 @@ fn main() {
                 let mut lists = vec![0u32; cnt[nall] as usize];
                 let mut d = p.lo.wrapping_sub(1);
                 for b in blocks {
-                    for &t in &b {
-                        if t == u32::MAX { d = d.wrapping_add(1); continue; }
+                    let mut q = 0;
+                    while q < b.len() {
+                        let mut t = b[q] as u32; q += 1;
+                        if t == 0xFFFF { d = d.wrapping_add(1); continue; }
+                        if t == 0xFFFE { t = (b[q] as u32) << 16 | b[q + 1] as u32; q += 2; }
                         lists[cur[t as usize] as usize] = d;
                         cur[t as usize] += 1;
                     }
@@ -430,4 +433,11 @@ fn map(path: &str) -> &'static [u8] {
     if len == 0 { return &[]; }
     let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+}
+
+// a block entry: a term id below 0xFFFE as one u16, a larger one as 0xFFFE then two halves;
+// 0xFFFF starts a doc. Most postings are common terms, which the queries name early.
+#[inline]
+fn put(b: &mut Vec<u16>, t: u32) {
+    if t < 0xFFFE { b.push(t as u16) } else { b.extend_from_slice(&[0xFFFE, (t >> 16) as u16, t as u16]) }
 }

@@ -47,6 +47,8 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Indexing was about 85% of the run (0.39 s of 0.46 s locally on 4 cores), with 26M doc postings for 75,747 terms and 40,350 phrase pairs.
 - Each short token's table slot is now prefetched and the lookup happens one token later, so the 4 MB key table miss overlaps the scan of the next token. Locally that's about 8% faster.
 - queries.txt is mapped instead of read into the heap.
+- Board: 0.358 s, 258 MB, 57.37 points (run-d3fbb7f46f7f), up from 0.379 s and 56.93.
+- The pair blocks, which set the peak, now hold u16 entries. Term ids below 0xFFFE take one slot, larger ones take three (an escape and two halves). The common terms come early in the queries, so they get small ids. The local peak went from about 186 MB to 155 MB at the same time.
 - Tried and dropped: terms found in more than 1 doc in 16 within the first 1024 docs going straight into a local bitset instead of the pair blocks. The peak went from 186 MB to 157 MB, but the run was 7% slower and the code longer. With the board's weights (T^0.5, M^0.2, S^0.15) that comes out slightly negative.
 - Tried and dropped: filling the dense term bitsets straight from the blocks. The peak is in the blocks, not the lists, so memory didn't move.
 
