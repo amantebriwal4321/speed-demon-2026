@@ -34,8 +34,10 @@ fn newline(b: &[u8]) -> usize {
 
 fn d2(b: &[u8]) -> usize { ((b[0] - b'0') * 10 + (b[1] - b'0')) as usize }
 
-// per-thread state: endpoint -> local id, and for every (local id, hour) its latencies and 5xx count
-struct Part<'a> { ids: FxMap<&'a [u8], u32>, eps: Vec<&'a [u8]>, lat: Vec<Vec<u32>>, err: Vec<u32> }
+// per-thread state: endpoint -> local id, and per hour a flat list of
+// (local id << 33 | latency << 1 | is_5xx). Sorting one hour's list later groups it by
+// endpoint and sorts each group's latencies in the same pass.
+struct Part<'a> { ids: FxMap<&'a [u8], u32>, eps: Vec<&'a [u8]>, rows: Vec<Vec<u64>> }
 
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
@@ -54,7 +56,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &b[cuts[k]..cuts[k + 1]];
             sc.spawn(move || {
-                let mut p = Part { ids: FxMap::default(), eps: Vec::new(), lat: Vec::new(), err: Vec::new() };
+                let mut p = Part { ids: FxMap::default(), eps: Vec::new(), rows: vec![Vec::with_capacity(c.len() / 77 / HOURS + 64); HOURS] };
                 let mut i = 0;
                 while i < c.len() {
                     let ts = &c[i..i + 27];
@@ -75,14 +77,8 @@ fn main() {
                     i = nl + 1;
                     let n = p.ids.len() as u32;
                     let id = *p.ids.entry(ep).or_insert_with(|| n);
-                    if id == n {
-                        p.eps.push(ep);
-                        p.lat.resize_with((n as usize + 1) * HOURS, Vec::new);
-                        p.err.resize((n as usize + 1) * HOURS, 0);
-                    }
-                    let g = id as usize * HOURS + hour;
-                    p.lat[g].push(v);
-                    p.err[g] += five as u32;
+                    if id == n { p.eps.push(ep); }
+                    p.rows[hour].push((id as u64) << 33 | (v as u64) << 1 | five as u64);
                 }
                 p
             })
@@ -95,39 +91,37 @@ fn main() {
     all.sort_unstable(); all.dedup();
     // local id -> global id, per part
     let maps: Vec<Vec<u32>> = parts.iter().map(|p| p.eps.iter().map(|e| all.binary_search(e).unwrap() as u32).collect()).collect();
-    // for each global endpoint, the (part, local id) pairs that hold it
-    let mut holders: Vec<Vec<(usize, usize)>> = vec![Vec::new(); all.len()];
-    for (pi, m) in maps.iter().enumerate() { for (li, &g) in m.iter().enumerate() { holders[g as usize].push((pi, li)); } }
-
-    let ne = all.len();
     let lines: Vec<Vec<u8>> = {
         let next = AtomicUsize::new(0);
         let slots: Vec<std::sync::Mutex<Vec<u8>>> = (0..HOURS).map(|_| Default::default()).collect();
         std::thread::scope(|sc| {
             for _ in 0..nt {
                 sc.spawn(|| {
-                    let mut buf: Vec<u32> = Vec::new();
+                    let mut buf: Vec<u64> = Vec::new();
                     loop {
                         let h = next.fetch_add(1, Ordering::Relaxed);
                         if h >= HOURS { break; }
-                        let day = (h + 18) / 24;
+                        let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][(h + 18) / 24];
                         let hh = (h + 18) % 24;
-                        let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][day];
+                        // swap in the global id, then one plain sort orders by endpoint, then latency
+                        buf.clear();
+                        for (pi, p) in parts.iter().enumerate() {
+                            buf.extend(p.rows[h].iter().map(|&x| (maps[pi][(x >> 33) as usize] as u64) << 33 | (x & 0x1_FFFF_FFFF)));
+                        }
                         let mut o = Vec::new();
-                        for g in 0..ne {
-                            buf.clear();
+                        buf.sort_unstable();
+                        let mut i = 0;
+                        while i < buf.len() {
+                            let g = buf[i] >> 33;
+                            let mut j = i;
                             let mut errs = 0u64;
-                            for &(pi, li) in &holders[g] {
-                                buf.extend_from_slice(&parts[pi].lat[li * HOURS + h]);
-                                errs += parts[pi].err[li * HOURS + h] as u64;
-                            }
-                            let n = buf.len();
-                            if n == 0 { continue; }
-                            buf.sort_unstable();
-                            let pc = |p: usize| buf[(p * n + 99) / 100 - 1];
+                            while j < buf.len() && buf[j] >> 33 == g { errs += buf[j] & 1; j += 1; }
+                            let n = j - i;
+                            let pc = |p: usize| (buf[i + (p * n + 99) / 100 - 1] >> 1) as u32;
                             write!(o, "{date}T{hh:02}:00:00Z ").unwrap();
-                            o.extend_from_slice(all[g]);
+                            o.extend_from_slice(all[g as usize]);
                             writeln!(o, " {} {} {} {} {} {}", n, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64).unwrap();
+                            i = j;
                         }
                         *slots[h].lock().unwrap() = o;
                     }

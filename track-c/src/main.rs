@@ -25,6 +25,20 @@ fn fx(b: &[u8]) -> u64 { let mut h = Fx(0); h.write(b); h.finish() }
 struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
 impl Agg { fn new() -> Self { Agg { count: 0, id_sum: 0, sum: 0, min: i64::MAX, max: i64::MIN, name_bytes: 0, note_bytes: 0 } } }
 
+// index of the first byte equal to `c`, eight bytes at a time
+#[inline]
+fn find(b: &[u8], c: u8) -> usize {
+    let pat = 0x0101010101010101u64 * c as u64;
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let x = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) ^ pat;
+        let z = x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080;
+        if z != 0 { return i + (z.trailing_zeros() / 8) as usize; }
+        i += 8;
+    }
+    i + b[i..].iter().position(|&x| x == c).unwrap()
+}
+
 const BOM: &[u8] = b"\xEF\xBB\xBF";
 
 // parse one text field at b[*i..]; returns (value, unescaped length) and leaves *i after the comma
@@ -34,7 +48,7 @@ fn field<'a>(b: &'a [u8], i: &mut usize) -> (Cow<'a, [u8]>, u64) {
         let mut j = start;
         let mut esc = false;
         loop {
-            let q = j + b[j..].iter().position(|&c| c == b'"').unwrap();
+            let q = j + find(&b[j..], b'"');
             if q + 1 < b.len() && b[q + 1] == b'"' { esc = true; j = q + 2; continue; }
             *i = q + 2; // closing quote and comma
             let raw = &b[start..q];
@@ -47,7 +61,7 @@ fn field<'a>(b: &'a [u8], i: &mut usize) -> (Cow<'a, [u8]>, u64) {
         }
     }
     let start = *i;
-    let e = start + b[start..].iter().position(|&c| c == b',').unwrap();
+    let e = start + find(&b[start..], b',');
     *i = e + 1;
     (Cow::Borrowed(&b[start..e]), (e - start) as u64)
 }
@@ -56,22 +70,27 @@ fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
 
-    // regions: region_id -> country index; countries listed in sorted order, _UNMATCHED last
+    // regions: region_id -> country index, countries numbered in sorted order, _UNMATCHED last.
+    // A code [A-Z]{3} is a number below 26^3, so counting the codes in numeric order sorts them.
     let r = std::fs::read(format!("{data}/regions.csv")).unwrap();
-    let mut pairs: Vec<(u32, [u8; 3])> = Vec::new();
-    for line in r.split(|&c| c == b'\n').skip(1) {
-        if line.is_empty() { continue; }
-        let c = line.iter().position(|&x| x == b',').unwrap();
-        let mut id = 0u32;
-        for &d in &line[..c] { id = id * 10 + (d - b'0') as u32; }
-        pairs.push((id, line[c + 1..c + 4].try_into().unwrap()));
+    let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
+    let mut raw: Vec<u16> = Vec::new(); // region_id -> code, u16::MAX if absent
+    while i < r.len() {
+        let mut id = 0usize;
+        while r[i] != b',' { id = id * 10 + (r[i] - b'0') as usize; i += 1; }
+        let c = &r[i + 1..i + 4];
+        if raw.len() <= id { raw.resize(id + 1, u16::MAX); }
+        raw[id] = (c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16;
+        i += 5;
     }
-    let mut names: Vec<[u8; 3]> = pairs.iter().map(|p| p.1).collect();
-    names.sort(); names.dedup();
+    let mut rank = vec![u16::MAX; 17576];
+    for &c in &raw { if c != u16::MAX { rank[c as usize] = 0; } }
+    let mut names: Vec<[u8; 3]> = Vec::new();
+    for c in 0..17576 {
+        if rank[c] == 0 { rank[c] = names.len() as u16; names.push([b'A' + (c / 676) as u8, b'A' + (c / 26 % 26) as u8, b'A' + (c % 26) as u8]); }
+    }
     let unm = names.len() as u16;
-    let maxid = pairs.iter().map(|p| p.0).max().unwrap_or(0) as usize;
-    let mut lookup = vec![unm; maxid + 1];
-    for (id, c) in &pairs { lookup[*id as usize] = names.binary_search(c).unwrap() as u16; }
+    let lookup: Vec<u16> = raw.iter().map(|&c| if c == u16::MAX { unm } else { rank[c as usize] }).collect();
     let ng = names.len() + 1;
 
     let b = map(&format!("{data}/records.csv"));
@@ -89,7 +108,7 @@ fn main() {
     }
     cuts.push(body.len());
 
-    let results: Vec<(Vec<Agg>, Vec<Cow<[u8]>>, Vec<Vec<u64>>)> = std::thread::scope(|sc| {
+    let results: Vec<(Vec<Agg>, Vec<Cow<[u8]>>, Vec<Vec<u64>>, Vec<Vec<u32>>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &body[cuts[k]..cuts[k + 1]];
             let lookup = &lookup;
@@ -130,14 +149,17 @@ fn main() {
                 }
                 let mut names = vec![Cow::Borrowed(&b""[..]); ids.len()];
                 for (k, v) in ids { names[v as usize] = k; }
-                (agg, names, bits)
+                // local ids bucketed by the merge shard that will own them
+                let mut bucket: Vec<Vec<u32>> = vec![Vec::new(); nt];
+                for (l, nm) in names.iter().enumerate() { bucket[fx(nm) as usize % nt].push(l as u32); }
+                (agg, names, bits, bucket)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     let mut total = vec![Agg::new(); ng];
-    for (a, _, _) in &results {
+    for (a, _, _, _) in &results {
         for g in 0..ng {
             let (t, x) = (&mut total[g], &a[g]);
             t.count += x.count; t.id_sum += x.id_sum; t.sum += x.sum;
@@ -152,10 +174,9 @@ fn main() {
             let results = &results;
             sc.spawn(move || {
                 let mut m: FxMap<&[u8], u32> = FxMap::default();
-                results.iter().map(|(_, names, _)| names.iter().map(|nm| {
-                    if fx(nm) as usize % nt != s { return u32::MAX; }
+                results.iter().map(|(_, names, _, bucket)| bucket[s].iter().map(|&l| {
                     let n = m.len() as u32;
-                    s as u32 + nt as u32 * *m.entry(&nm[..]).or_insert(n)
+                    s as u32 + nt as u32 * *m.entry(&names[l as usize][..]).or_insert(n)
                 }).collect()).collect()
             })
         }).collect();
@@ -163,7 +184,9 @@ fn main() {
     });
     // per part, local id -> global id
     let gid: Vec<Vec<u32>> = (0..results.len()).map(|p| {
-        (0..results[p].1.len()).map(|l| (0..nt).map(|s| shards[s][p][l]).find(|&x| x != u32::MAX).unwrap()).collect()
+        let mut g = vec![0u32; results[p].1.len()];
+        for s in 0..nt { for (&l, &x) in results[p].3[s].iter().zip(&shards[s][p]) { g[l as usize] = x; } }
+        g
     }).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let distinct: Vec<std::sync::atomic::AtomicU64> = (0..ng).map(|_| Default::default()).collect();
@@ -176,7 +199,7 @@ fn main() {
                     if g >= ng { break; }
                     seen.clear();
                     let mut c = 0;
-                    for (p, (_, _, bits)) in results.iter().enumerate() {
+                    for (p, (_, _, bits, _)) in results.iter().enumerate() {
                         for (w, &word) in bits[g].iter().enumerate() {
                             let mut x = word;
                             while x != 0 {

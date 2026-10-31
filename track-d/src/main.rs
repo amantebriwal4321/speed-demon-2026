@@ -10,6 +10,23 @@ fn num(b: &[u8], i: &mut usize) -> u32 {
     v
 }
 
+// distances as u32, with the rare value that does not fit (above 2^32 - 3) kept in a side map.
+// Halves the per thread memory of a dense u64 array.
+const INF: u32 = u32::MAX;
+const SPILL: u32 = u32::MAX - 1;
+struct Dist { small: Vec<u32>, big: std::collections::HashMap<u32, u64> }
+impl Dist {
+    fn new(n: usize) -> Self { Dist { small: vec![INF; n], big: Default::default() } }
+    #[inline]
+    fn get(&self, v: u32) -> u64 {
+        match self.small[v as usize] { INF => u64::MAX, SPILL => self.big[&v], x => x as u64 }
+    }
+    #[inline]
+    fn set(&mut self, v: u32, d: u64) {
+        if d < SPILL as u64 { self.small[v as usize] = d as u32; } else { self.small[v as usize] = SPILL; self.big.insert(v, d); }
+    }
+}
+
 struct Ptr(*mut u64);
 unsafe impl Sync for Ptr {}
 struct Ptr2(*mut (u32, u32));
@@ -173,7 +190,7 @@ fn main() {
         for _ in 0..nt {
             sc.spawn(|| {
                 // bidirectional Dijkstra: side 0 runs forward from s, side 1 backward from t
-                let mut dist = [vec![u64::MAX; n], vec![u64::MAX; n]];
+                let mut dist = [Dist::new(n), Dist::new(n)];
                 let mut touched: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
                 let mut heap: [BinaryHeap<Reverse<(u64, u32)>>; 2] = [BinaryHeap::new(), BinaryHeap::new()];
                 let g = [(&off, &adj), (&roff, &radj)];
@@ -184,7 +201,7 @@ fn main() {
                     let mut best = u64::MAX;
                     if s == t { best = 0; } else {
                         for (side, x) in [(0, s), (1, t)] {
-                            dist[side][x as usize] = 0; touched[side].push(x); heap[side].push(Reverse((0, x)));
+                            dist[side].set(x, 0); touched[side].push(x); heap[side].push(Reverse((0, x)));
                         }
                         loop {
                             let tf = heap[0].peek().map(|r| r.0 .0);
@@ -193,24 +210,25 @@ fn main() {
                             if tf.saturating_add(tb) >= best { break; }
                             let side = if heap[0].len() <= heap[1].len() { 0 } else { 1 };
                             let Reverse((d, u)) = heap[side].pop().unwrap();
-                            if d > dist[side][u as usize] { continue; }
+                            if d > dist[side].get(u) { continue; }
                             let (o, a) = g[side];
                             let [df, db] = &mut dist;
                             let (mine, other) = if side == 0 { (df, &*db) } else { (db, &*df) };
                             for &(v, w) in &a[o[u as usize] as usize..o[u as usize + 1] as usize] {
                                 let nd = d + w as u64;
-                                let dv = &mut mine[v as usize];
-                                if nd < *dv {
-                                    if *dv == u64::MAX { touched[side].push(v); }
-                                    *dv = nd;
+                                let dv = mine.get(v);
+                                if nd < dv {
+                                    if dv == u64::MAX { touched[side].push(v); }
+                                    mine.set(v, nd);
                                     heap[side].push(Reverse((nd, v)));
-                                    let ov = other[v as usize];
+                                    let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }
                                 }
                             }
                         }
                         for side in 0..2 {
-                            for &x in &touched[side] { dist[side][x as usize] = u64::MAX; }
+                            for &x in &touched[side] { dist[side].small[x as usize] = INF; }
+                            dist[side].big.clear();
                             touched[side].clear(); heap[side].clear();
                         }
                     }
