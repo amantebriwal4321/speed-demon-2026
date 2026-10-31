@@ -180,3 +180,14 @@ fn main() {
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/results.txt"), o).unwrap();
 }
+
+// read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
+fn map(path: &str) -> &'static [u8] {
+    use std::os::unix::io::AsRawFd;
+    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+    let f = std::fs::File::open(path).unwrap();
+    let len = f.metadata().unwrap().len() as usize;
+    if len == 0 { return &[]; }
+    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+}
