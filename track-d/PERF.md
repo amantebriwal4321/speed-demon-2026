@@ -10,6 +10,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 3 | u32 distances with a side map for the few above 2^32 | run-aa04a894c3d5 | 0.306 | 327 | 56.94 |
 | 4 | CSR built per node range bucket, no atomics | run-093e22eb3b78 | 0.277 | 314 | 57.96 |
 | 5 | per query distances in a small open addressing table instead of a dense array per thread | run-5205ad48a187 | 0.307 | 172 | 59.08 |
+| 6 | hash slot is one u64 (node, dist), so a probe is one load | run-9ecfb196b1c8 | 0.304 | 177 | 59.12 |
 
 ## Step 1: why it got faster
 
@@ -31,6 +32,11 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Each of the 12 query threads had two dense u32 arrays over 1.74M nodes, about 167 MB in total. A query reaches about 4k nodes on average (78k at most), so each side now uses a 16k slot open addressing table that grows on demand and gets wiped after every query.
 - That costs 30 ms on the board, but memory drops from 314 MB to 172 MB, so it comes out ahead on points.
 - Tried and dropped: parsing twice to skip the edge buckets (70 ms slower, same peak) and skipping the BFS relabel (much slower queries).
+
+## Round 4
+
+- Each distance table slot now packs node and distance into one u64, so a probe is one load.
+- Tried and dropped: a heap of packed u64 (dist, node) keys. It made no measurable difference, because the time goes to the hash probes and the edge reads, not the heap.
 
 ## Next ideas
 

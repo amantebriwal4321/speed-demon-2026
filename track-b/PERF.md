@@ -9,6 +9,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 2 | token stream of term ids for phrases instead of (doc, pos) postings, packed u128 token table, queries run per part, mmap | run-52fac7961fbc | 0.631 | 366 | 52.19 |
 | 3 | doc lists by counting sort over the stream, SSE2 tokenizer, better hash mixing, only count, sum and top 10 kept per query | run-fd411d459da0 | 0.417 | 289 | 56.88 |
 | 4 | u16 token stream: phrase terms get the low ids, other query terms go to a per doc presence list | run-9a693a205195 | 0.428 | 213 | 57.35 |
+| 5 | BOOL on bitsets: ready made bitsets for terms in more than 1 doc in 32, a scratch bitset for the rest | run-3672a75d2a36 | 0.365 | 229 | 58.03 |
 
 ## Step 1: why it got faster
 
@@ -35,6 +36,12 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 - Phrase terms get ids first. There are 33k of them, so the stream fits in u16, and the other query terms only need a deduped per doc list to build their doc lists. If a phrase term ever lands past 65534 it gets a marker in the stream and the doc text gets retokenized to confirm. That path was tested by forcing the cutoff to 1000.
 - Tried and dropped: merging into one global doc list per term. Same speed, more memory.
 
+## Round 4
+
+- BOOL was about 70% of query time, mostly long OR and AND chains over the common terms. Any term in more than 1 doc in 32 now gets a bitset over all 250k docs up front (31 KB each, about 16 MB in all). An op on such a term is one word wise pass.
+- Queries whose lists add up to more than 2 bits per word run on a scratch bitset: OR sets bits, NOT clears them, AND keeps the list's docs whose bit is set. Doc ids come out ascending, so the first ten fall out of the final scan. Short queries keep the sorted list merges.
+- Lower cutoffs used more memory and were no faster.
+
 ## Next ideas
 
-The query phase is now the biggest piece, mostly long OR and AND chains over the common terms. Bitsets for the most frequent terms are next.
+Tokenizing is the largest piece again, then the phrase checks.
