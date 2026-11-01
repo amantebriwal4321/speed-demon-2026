@@ -325,7 +325,11 @@ fn main() {
                                     let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }
                                     // anything left from v to the other end costs at least the other frontier
-                                    if nd + lim < best { heap[side].push(nd, v); }
+                                    if nd + lim < best {
+                                        heap[side].push(nd, v);
+                                        // v's offsets are read when it is popped: start that miss now, into L2
+                                        unsafe { std::arch::x86_64::_mm_prefetch(o.as_ptr().add(v as usize) as *const i8, std::arch::x86_64::_MM_HINT_T1) };
+                                    }
                                 }
                             }
                         }

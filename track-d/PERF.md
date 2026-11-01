@@ -119,3 +119,7 @@ perf listed `num` as its own function (3.5% of samples): three calls per edge li
 
 ## Round 22: Radix::fill and Dist::set_at inlined
 Both were marked `#[inline]` but stayed out of line (fill was 8.8% of samples under its own name). `#[inline(always)]` on both: three sets of 15 alternating runs, 0.592 -> 0.548, 0.614 -> 0.593 s at 4 threads and 0.693 -> 0.653 s with 12; CPU -4 to -9%. Exact on s7, s42, t5, full, h99, h3.
+Rounds 21 + 22 on the board: run-83d7b5a8003b, 0.2298 s, 63.97 points, a new best.
+
+## Round 23: prefetch a pushed node's offsets
+Annotating the query loop: the two hottest loads are a popped node's first edge (16% of the loop) and its offsets (11%), then the two distance-table probes. A node is pushed some time before it is popped, so the push now prefetches its offsets into L2. 15 alternating runs: 0.478 -> 0.461 s at 4 threads; with 12 threads 0.586 -> 0.543 and 0.574 -> 0.541 s. A T0 (L1) hint was 4% worse than T1. Exact on s7, s42, t5, full, h99, h3.
