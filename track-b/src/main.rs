@@ -26,29 +26,31 @@ fn seek(b: &[u16], j: &mut usize, x: u16) -> bool {
     *j += b[*j..hi].partition_point(|&y| y < x);
     *j < b.len() && b[*j] == x
 }
-fn and(a: &[u16], b: &[u16]) -> Vec<u16> {
+// the list ops write into o, a buffer the caller reuses from query to query
+fn and(a: &[u16], b: &[u16], o: &mut Vec<u16>) {
+    o.clear();
     let (a, b) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if a.len() * 8 < b.len() {
         let mut j = 0;
-        return a.iter().copied().filter(|&x| seek(b, &mut j, x)).collect();
+        return o.extend(a.iter().copied().filter(|&x| seek(b, &mut j, x)));
     }
-    let (mut i, mut j, mut o) = (0, 0, Vec::new());
+    let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         if a[i] < b[j] { i += 1 } else if a[i] > b[j] { j += 1 } else { o.push(a[i]); i += 1; j += 1; }
     }
-    o
 }
-fn or(a: &[u16], b: &[u16]) -> Vec<u16> {
-    let (mut i, mut j, mut o) = (0, 0, Vec::with_capacity(a.len() + b.len()));
+fn or(a: &[u16], b: &[u16], o: &mut Vec<u16>) {
+    let (mut i, mut j) = (0, 0);
+    o.clear();
     while i < a.len() && j < b.len() {
         if a[i] < b[j] { o.push(a[i]); i += 1 } else if a[i] > b[j] { o.push(b[j]); j += 1 } else { o.push(a[i]); i += 1; j += 1; }
     }
     o.extend_from_slice(&a[i..]); o.extend_from_slice(&b[j..]);
-    o
 }
-fn not(a: &[u16], b: &[u16]) -> Vec<u16> {
+fn not(a: &[u16], b: &[u16], o: &mut Vec<u16>) {
     let mut j = 0;
-    a.iter().copied().filter(|&x| !seek(b, &mut j, x)).collect()
+    o.clear();
+    o.extend(a.iter().copied().filter(|&x| !seek(b, &mut j, x)));
 }
 
 // a token of up to 16 bytes, lowercased, packed little endian into a u128 (zero padded).
@@ -356,6 +358,7 @@ fn main() {
         for _ in 0..nt {
             sc.spawn(|| {
             let (mut acc, mut tmp) = (Vec::<u64>::new(), Vec::<u64>::new());
+            let (mut x, mut y) = (Vec::<u16>::new(), Vec::<u16>::new());
             loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 if k >= qs.len() { break; }
@@ -405,25 +408,38 @@ fn main() {
                         while b != 0 && r.len() < 10 { r.push((w * 64) as u32 + b.trailing_zeros()); b &= b - 1; }
                     }
                 }
+                // a phrase's terms are sorted out once, not per part: the rarest word anchors the
+                // text check, the common ones are tested on their bitsets, the rest are ANDed
+                // shortest first
+                let (mut anchor, mut dn, mut ld) = (0, Vec::new(), Vec::new());
+                if let Q::Phrase((ts, ks)) = &qs[k] {
+                    anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
+                    let mut order: Vec<u32> = ts.clone();
+                    order.sort_unstable();
+                    order.dedup();
+                    (dn, ld) = order.into_iter().partition(|&t| (t as usize) < nd);
+                    ld.sort_by_key(|&t| tlen(t as usize));
+                }
                 for p in parts.iter().filter(|_| !big) {
                     match &qs[k] {
                         Q::Bool(v) => {
-                            let mut x = dl(p, v[0].1).to_vec();
+                            x.clear();
+                            x.extend_from_slice(dl(p, v[0].1));
                             for &(op, t) in &v[1..] {
-                                x = match op { 1 => and(&x, dl(p, t)), 2 => or(&x, dl(p, t)), _ => not(&x, dl(p, t)) };
+                                match op { 1 => and(&x, dl(p, t), &mut y), 2 => or(&x, dl(p, t), &mut y), _ => not(&x, dl(p, t), &mut y) }
+                                std::mem::swap(&mut x, &mut y);
                             }
                             add(&mut cnt, &mut sum, &mut r, &x, p.lo);
                         }
                         Q::Phrase((ts, ks)) => {
-                            let anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
                             // docs holding every term, then the doc text decides
-                            let mut order: Vec<u32> = ts.clone(); order.sort_unstable(); order.dedup();
-                            let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| (t as usize) < nd);
-                            let mut ld = ld; ld.sort_by_key(|&t| dl(p, t).len());
-                            let mut hit = if let Some(&t0) = ld.first() { dl(p, t0).to_vec() } else {
-                                (0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16).collect()
-                            };
-                            for &t in ld.iter().skip(1) { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
+                            let hit = &mut x;
+                            hit.clear();
+                            match ld.first() {
+                                Some(&t0) => hit.extend_from_slice(dl(p, t0)),
+                                None => hit.extend((0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16)),
+                            }
+                            for &t in ld.iter().skip(1) { if hit.is_empty() { break; } and(hit, dl(p, t), &mut y); std::mem::swap(hit, &mut y); }
                             if !ld.is_empty() { hit.retain(|&x| { let d = p.lo + x as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }); }
                             if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, anchor, &lower)); }
                             add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
