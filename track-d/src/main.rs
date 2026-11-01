@@ -209,6 +209,7 @@ fn main() {
         for (c, (os, ds)) in order.chunks(per).zip(noff[1..].chunks_mut(per)).enumerate() {
             let (newid, off) = (&newid, &off);
             sc.spawn(move || for (i, (&u, d)) in os.iter().zip(ds.iter_mut()).enumerate() {
+                if let Some(&w) = os.get(i + 16) { pf(off, w as usize); pf(newid, w as usize); }
                 newid[u as usize].store((c * per + i) as u32, Relaxed);
                 *d = off[u as usize + 1] - off[u as usize];
             });
@@ -234,6 +235,8 @@ fn main() {
                     let mut p = 0;
                     for k in lo..hi {
                         let u = order[k] as usize;
+                        if let Some(&w) = order.get(k + 16) { pf(off, w as usize); }
+                        if let Some(&w) = order.get(k + 8) { pf(adj, off[w as usize] as usize); }
                         for e in &adj[off[u] as usize..off[u + 1] as usize] {
                             let x = *e;
                             s[p] = x & !vm | newid[(x & vm) as usize]; p += 1;
@@ -353,6 +356,10 @@ fn main() {
     std::fs::write(format!("{out}/distances.txt"), o).unwrap();
     std::process::exit(0);
 }
+
+// start a cache miss early, into L2: the build walks nodes in an order it knows ahead
+#[inline(always)]
+fn pf<T>(x: &[T], i: usize) { if i < x.len() { unsafe { std::arch::x86_64::_mm_prefetch(x.as_ptr().add(i) as *const i8, std::arch::x86_64::_MM_HINT_T1) } } }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
 fn map(path: &str) -> &'static [u8] {

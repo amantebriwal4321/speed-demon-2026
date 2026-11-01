@@ -123,3 +123,7 @@ Rounds 21 + 22 on the board: run-83d7b5a8003b, 0.2298 s, 63.97 points, a new bes
 
 ## Round 23: prefetch a pushed node's offsets
 Annotating the query loop: the two hottest loads are a popped node's first edge (16% of the loop) and its offsets (11%), then the two distance-table probes. A node is pushed some time before it is popped, so the push now prefetches its offsets into L2. 15 alternating runs: 0.478 -> 0.461 s at 4 threads; with 12 threads 0.586 -> 0.543 and 0.574 -> 0.541 s. A T0 (L1) hint was 4% worse than T1. Exact on s7, s42, t5, full, h99, h3.
+Board: run-c29392d5df70, 0.2240 s, 89.5 MB, 64.35 points, a new best, rank 37 -> 33 of 98.
+
+## Round 24: prefetch ahead in the relabel
+The newid and relabel passes walk the nodes in BFS order and read the old graph at random: offsets, then the edge list, then newid of every head. The order is known ahead, so each step prefetches (into L2) the offsets 16 nodes ahead and the edge list 8 ahead. Phase times over 13 alternating runs: relabel 49 -> 27 ms, newid 23 -> 20 ms. Tried and dropped: prefetching a node's offsets when the BFS queues it (bfs +3 ms) and look-ahead in the reverse build (+8 ms). End to end, 15 alternating runs: 0.475 -> 0.454 s at 4 threads, 0.528 -> 0.524 s with 12, CPU -3%. Exact on s7, s42, t5, full, h99, h3.
