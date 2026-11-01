@@ -62,3 +62,6 @@ Endpoint bytes are compared in the mmap instead of a copied arena (arena, aoff a
 
 ## Round 14: plain sort for percentiles
 Groups average about 25 rows (3.1M rows, 127k output lines), so three select_nth passes buy nothing over one sort_unstable. rustfmt lines 397 -> 369. Exact on s7, s42, t3, t5, full; medians equal across four paired runs.
+
+## Round 15: write outside the lock
+The thread that flushed finished hours used to hold the lock through write_all, so every other thread waited to drop its hour off (3-4 ms per thread). Now one thread at a time is the writer: it takes the ready run of hours under the lock, writes them unlocked, then checks again. Exact on s7, s42, t3, t5, full; three paired medians 0.0524/0.0553/0.0507 -> 0.0504/0.0546/0.0494 s (box slower than earlier today), peak 15 MB.

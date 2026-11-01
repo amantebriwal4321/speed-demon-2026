@@ -144,7 +144,7 @@ fn main() {
     // only a few finished hours ever wait in memory
     std::fs::create_dir_all(&out).ok();
     let file = std::fs::File::create(format!("{out}/summary.txt")).unwrap();
-    let wr: std::sync::Mutex<(usize, Vec<Option<Vec<u8>>>, &std::fs::File)> = std::sync::Mutex::new((0, (0..HOURS).map(|_| None).collect(), &file));
+    let wr: std::sync::Mutex<(usize, Vec<Option<Vec<u8>>>, bool)> = std::sync::Mutex::new((0, (0..HOURS).map(|_| None).collect(), false));
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
@@ -193,13 +193,18 @@ fn main() {
                         for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
                         o.push(b'\n');
                     }
+                    // one thread at a time writes, outside the lock, so the others only drop their hour off
                     let mut w = wr.lock().unwrap();
                     w.1[h] = Some(o);
-                    while w.0 < HOURS {
-                        let k = w.0;
-                        let Some(x) = w.1[k].take() else { break };
-                        (&*w.2).write_all(&x).unwrap();
-                        w.0 += 1;
+                    if w.2 { continue; }
+                    w.2 = true;
+                    loop {
+                        let mut ready = Vec::new();
+                        while w.0 < HOURS { let k = w.0; let Some(x) = w.1[k].take() else { break }; ready.push(x); w.0 += 1; }
+                        if ready.is_empty() { w.2 = false; break; }
+                        drop(w);
+                        for x in ready { (&file).write_all(&x).unwrap(); }
+                        w = wr.lock().unwrap();
                     }
                 }
             });
