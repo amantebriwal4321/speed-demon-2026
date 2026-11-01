@@ -290,10 +290,6 @@ fn main() {
     let big: HashMap<(u32, u32), u32> = big.into_iter().map(|((a, b), w)| ((newid[a as usize], newid[b as usize]), w)).collect();
     drop(newid);
     let ans: Vec<AtomicU64> = (0..qs.len()).map(|_| AtomicU64::new(0)).collect();
-    // the longest searches go first, so the threads end on short ones and finish together: after
-    // the BFS relabel, ids far apart are mostly far apart in the graph too
-    let mut todo: Vec<usize> = (0..qs.len()).collect();
-    todo.sort_by_key(|&k| std::cmp::Reverse(qs[k].0.abs_diff(qs[k].1)));
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
         for _ in 0..nt {
@@ -303,7 +299,8 @@ fn main() {
                 let mut heap = [Radix::new(), Radix::new()];
                 let g = [(&off, &adj), (&roff, &radj)];
                 loop {
-                    let Some(&k) = todo.get(next.fetch_add(1, Relaxed)) else { break };
+                    let k = next.fetch_add(1, Relaxed);
+                    if k >= qs.len() { break; }
                     let (s, t) = qs[k];
                     let mut best = u64::MAX;
                     if s == t { best = 0; } else {

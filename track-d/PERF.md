@@ -141,3 +141,6 @@ Tried and dropped since: expanding the side that has reached fewer nodes (+4%) o
 
 ## Round 26: longest searches first (board experiment)
 The costliest 10% of the queries do 75% of the work, so one big search started last can hold up the end of the phase. Queries now run in order of |s - t| in the relabelled ids, largest first: over the 2,000 queries that distance has a rank correlation of 0.67 with the pops a search takes. Locally within noise (+2.5% at 4 threads, -2.9% with 12); the board decides, over several runs. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 27: round 26 out (board A/B)
+Round 26 (longest searches first) over 27 board runs: median 0.2279 s, best 0.2127 s. Before it the board had only three runs of the same code (0.2196, 0.2155, 0.2268 s, median 0.2196). Round 26 comes out again so the two can be compared on the same day's runs. Exact on s7, s42, t5, full, h99, h3.
