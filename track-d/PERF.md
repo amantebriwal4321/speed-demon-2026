@@ -148,3 +148,6 @@ Board without round 26: run-18a29590e6bd 0.2517 s, run-5125b6840ce9 0.2147 s.
 
 ## Round 28: each thread drops its share's page tables
 As in A and C: once a thread has parsed its share of graph.txt it never reads the text again, so it drops the share's page table entries with MADV_DONTNEED (a read lock, so the other threads keep faulting in) instead of leaving a 92 MB mapping to be torn down on one thread at exit. 15 alternating runs: 484.8 -> 475.3 ms. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 29: glibc linked statically
+`-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.

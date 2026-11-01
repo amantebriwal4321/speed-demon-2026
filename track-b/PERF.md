@@ -218,3 +218,6 @@ Rounds 39 + 40 on the board: run-ab5c70f27fa2 0.2391 s, 68.4 MB (from 70.4); run
 
 ## Round 41: the docs' page tables dropped by the answering threads
 At exit the kernel tore the 254 MB docs mapping down on one thread. The docs are read until the last phrase is checked, so nothing can go during the scan; instead each answering thread, once no queries are left to hand out, drops one share's page table entries with MADV_DONTNEED (the file stays in the page cache; a query still running elsewhere that reads there faults the page back in). 15 alternating runs: 591.4 -> 571.3 ms. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 42: glibc linked statically
+`-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.

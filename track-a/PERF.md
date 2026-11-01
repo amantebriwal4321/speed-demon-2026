@@ -114,3 +114,6 @@ Board: round 26 alone run-6efec75da0d8 0.0413 s (A's slow runs come in about one
 
 ## Round 28: each thread drops its share's page tables (board experiment)
 C's round 24 on A: once a thread has parsed its share of the log it never reads it again (endpoint text is copied), so it drops the share's page table entries with MADV_DONTNEED (a read lock, like a page fault, so the other threads keep faulting in), and the exit no longer tears down a 239 MB mapping on one thread. An munmap version lost to the address-space lock (C round 20, and here while the row blocks were still mmaps); since round 26 there are none left to contend with. 21 alternating runs: 73.6 -> 70.0 ms at 4 threads, 88.6 -> 87.9 ms with 12 forced. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 29: glibc linked statically
+`-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.
