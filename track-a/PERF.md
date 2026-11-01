@@ -122,3 +122,4 @@ C's round 24 on A: once a thread has parsed its share of the log it never reads 
 - An hour's gather buffer was cleared to its new length every hour (`clear` then `resize`: a 170 KB memset, 1.4% of the instructions on s7), but the scatter writes every slot below the hour's row count, so it now only grows.
 - A thread's region of each hour is looked up from a 72-entry array made once, instead of computed with a multiply on every line.
 s7: 134.5M -> 131.9M instructions; 31 alternating runs: 60.0 -> 59.2 ms. Exact on s7, s42, t5, full, h99, h3.
+Reverted (round 31): on the board round 30 ran 0.0292, 0.0261, 0.0336, 0.0298 and 0.0335 s, against six runs of round 29 between 0.0260 and 0.0269 s, while the other tracks' times in the same runs stayed put. The likely cause is the gather buffer: cleared, it was streamed into cache before the scatter's random writes; left as it was, those writes miss. Back to round 29.

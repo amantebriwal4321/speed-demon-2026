@@ -65,7 +65,6 @@ fn main() {
             sc.spawn(move || {
                 let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), text: vec![0; 64] };
                 let (mut n, mut side) = ([0usize; HOURS], vec![Vec::new(); HOURS]);
-                let reg: [*mut u32; HOURS] = std::array::from_fn(|h| rows.region(h, k)); // this thread's region of each hour
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
                 let mut start = lo;
@@ -131,7 +130,7 @@ fn main() {
                             s = (s + 1) & (TB - 1);
                         };
                         if v < LAT_ESC as u64 && id < 2047 {
-                            unsafe { *reg[hour].add(n[hour]) = id << 21 | (five as u32) << 20 | v as u32 };
+                            unsafe { *rows.region(hour, k).add(n[hour]) = id << 21 | (five as u32) << 20 | v as u32 };
                             n[hour] += 1;
                         } else { side[hour].push((id as u64) << 33 | v << 1 | five as u64); }
                     }
@@ -207,9 +206,8 @@ fn main() {
                         for &x in side.iter() { cnt[m[(x >> 33) as usize] as usize + 1] += 1; }
                     }
                     for g in 0..ne { cnt[g + 1] += cnt[g]; }
-                    // every slot below total is written by the scatter, so a longer buffer is not cleared
                     let total = cnt[ne] as usize;
-                    if buf.len() < total { buf.resize(total, 0); }
+                    buf.clear(); buf.resize(total, 0);
                     let mut cur = cnt.clone();
                     for (pi, (r, side)) in rs.iter().enumerate() {
                         let m = &maps[pi];
