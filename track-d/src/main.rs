@@ -73,6 +73,8 @@ impl Dist {
     fn track(&mut self, i: usize) { if self.used.len() * 16 < self.t.len() { self.used.push(i as u32); } }
     // most searches touch a few thousand slots of a table grown by an earlier big one
     fn clear(&mut self) {
+        // the few searches that grow a table past 64K slots give it back afterwards
+        if self.t.len() > 1 << 16 { *self = Dist::new(); return; }
         if (self.used.len() + 1) * 16 < self.t.len() { for &i in &self.used { self.t[i as usize] = E; } } else { self.t.fill(E); }
         self.used.clear(); self.len = 0; self.big.clear();
     }
@@ -384,5 +386,5 @@ impl Radix {
     fn min(&mut self) -> Option<u64> { self.fill(); if self.len == 0 { None } else { Some(self.last) } }
     #[inline]
     fn pop(&mut self) -> (u64, u32) { self.fill(); self.len -= 1; self.b[0].pop().unwrap() }
-    fn clear(&mut self) { for x in &mut self.b { x.clear(); } self.len = 0; self.last = 0; }
+    fn clear(&mut self) { for x in &mut self.b { x.clear(); x.shrink_to(1 << 12); } self.len = 0; self.last = 0; }
 }

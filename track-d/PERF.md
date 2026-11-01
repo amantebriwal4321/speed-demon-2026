@@ -102,3 +102,6 @@ Tried and dropped, all exact:
 - Expanding the side with the smaller top key instead of the smaller heap: 3.4x slower (the graph is far from symmetric).
 - Shrinking each table back to 16K slots after a big search (with the fixed threshold): 71 MB peak but queries +12%.
 Profile of the query loop (perf, 4 cores): about 30% of its samples are misses on `off`/`adj`, 32% on the two distance-table probes, and Radix::fill is 11% of the whole run.
+
+## Round 18: the biggest searches give their tables back
+A 2 ms trace of the cgroup usage with 12 threads: 73 MB at the CSR build, then the query phase climbing from 65 to 85 MB as each thread keeps the largest table and heap it ever grew. A table past 64K slots (512 KB) now goes back to the start size after its search, and heap buckets shrink to 4K entries; only the few biggest searches pay to grow again. Shrinking everything past 16K slots (round 17's try) cost 12%; this costs nothing measurable (11 alternating runs: queries 305 -> 298 ms). 12-thread peak 84-85 -> 80-81 MB. Exact on s7, s42, t5, full.
