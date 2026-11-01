@@ -125,3 +125,6 @@ fx() hashed a name's 8 byte chunks and then its last 0 to 7 bytes one by one, a 
 
 ## Round 23: round 20 out again
 Board for round 20 (each thread unmaps its part): run-c4d5dfb1a6be 0.0484 s, run-ee6c4ecb424a 0.0621 s, then with round 21 run-c5bd03ba4b28 0.0603 s, against a median near 0.048 s before. On 12 threads the first threads to finish unmap while the rest are still faulting pages in from the same mapping, and an unmap takes the address-space lock and interrupts every core the process runs on. On 4 cores without SMT the threads finish together, so it did not show. Rounds 21 and 22 stay. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 24: each thread drops its part's page tables with madvise (board experiment)
+Round 20's idea again, without what made it slow on the board: munmap takes the address-space lock for writing, so a thread that finished early held off the page faults of the threads still parsing. MADV_DONTNEED only takes it for reading, like a page fault, and drops the same page table entries (the file stays in the page cache), so the exit no longer tears down the 200 MB mapping on one thread. Exact on s7, s42, t5, full, h99, h3. 21 alternating runs: 116.3 -> 113.4 ms at 4 threads, 119.2 -> 117.1 ms with 12 forced; the board decides.

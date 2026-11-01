@@ -165,6 +165,11 @@ fn main() {
                     pg = g; pme = me; pj = j0;
                 }
                 if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
+                // drop this part's page table entries now, on this thread, rather than all of
+                // them at exit on one (madvise, unlike munmap, does not lock out the other threads'
+                // page faults). The neighbour before may still read a few bytes past its end, so a
+                // margin stays mapped at the front.
+                release(&c[(lo + 256).min(hi)..hi]);
                 agg
             })
         }).collect();
@@ -210,6 +215,14 @@ fn map(path: &str) -> &'static [u8] {
 #[inline(always)]
 fn prefetchw<T>(p: *const T) {
     unsafe { std::arch::asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags, readonly)) }
+}
+
+// MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
+// this process's mapping of them goes
+fn release(b: &[u8]) {
+    extern "C" { fn madvise(a: *const u8, l: usize, advice: i32) -> i32; }
+    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
+    if a < e { unsafe { madvise(a as *const u8, e - a, 4) }; }
 }
 
 const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
