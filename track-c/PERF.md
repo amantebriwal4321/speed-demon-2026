@@ -110,3 +110,6 @@ callgrind on s7: the 200,000 region rows (the same count at every scale) took 14
 
 ## Round 18: field() inlined
 callgrind counts about 730 instructions per record, and `field` was a real call twice per record (332,000 calls on s7) with its prologue and spills. `#[inline(always)]`: CPU 0.50 -> 0.47 s at 4 threads and 0.48 -> 0.45 s with 12, 21 alternating runs each. Exact on s7, s42, t5, full, and on two fresh seeds checked against the reference (99 at sample scale, 3 at tiny).
+
+## Round 19: structural bitmasks again (not kept)
+A second try at round 5's idea, now with the AVX2 build: quote, comma and LF masks per 64 bytes, a shift-based prefix XOR for the quoted bytes (carry-less multiply is not in x86-64-v3), separators outside quotes as field and record ends, and a running quote count for each quoted field's "" pairs, replacing `field` and `find`. Exact on s7, s42, t5, full, h99, h3 on the first try, but callgrind counts the same instructions (194M against 193M on s7: about 20 per separator, five separators a record, cost what the quote searches did), and it ran 5% slower over 21 alternating runs.
