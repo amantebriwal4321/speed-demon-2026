@@ -66,3 +66,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Next ideas
 
 Tokenizing is the largest piece again, then the phrase checks.
+
+## Round 9: phrase-pair lists dropped
+Phrase queries now AND the plain term lists and verify each candidate on the document text:
+SSE2 scan for the first word's first byte (case folded), then exact whole-token match through
+the lowercase table. Words over 16 bytes keep the old tokenizing check. No pair table is built.
+Local (full, medians of 4 runs x2): 0.331 s -> 0.343 s (+3.5%), anon peak 147 MB -> 120 MB (-18%).
+By the T^0.5 M^0.2 score that is about +0.5 points net. Exact on s7, s42, t5, full.

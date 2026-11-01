@@ -166,7 +166,7 @@ fn main() {
     // adjacent pairs of phrase terms get their own doc lists: they answer two term phrases
     // outright and leave very few docs for longer ones to check
     let mut pairs: FxMap<u64, u32> = FxMap::default();
-    for q in &qs { if let Q::Phrase((ts, _)) = q { for w in ts.windows(2) { let n = (nterm + pairs.len()) as u32; pairs.entry((w[0] as u64 + 1) << 32 | w[1] as u64).or_insert(n); } } }
+    for q in qs.iter().filter(|_| false) { if let Q::Phrase((ts, _)) = q { for w in ts.windows(2) { let n = (nterm + pairs.len()) as u32; pairs.entry((w[0] as u64 + 1) << 32 | w[1] as u64).or_insert(n); } } }
     let nall = nterm + pairs.len();
     let bcap = (pairs.len() * 2).next_power_of_two().max(16);
     let bsh = 64 - bcap.trailing_zeros();
@@ -240,7 +240,7 @@ fn main() {
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
                             if last[t as usize] != d { last[t as usize] = d; put(&mut blk, t); cnt[t as usize + 1] += 1; }
-                            if prev != u32::MAX {
+                            if false && prev != u32::MAX {
                                 let k = (prev as u64 + 1) << 32 | t as u64;
                                 let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
                                 let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
@@ -400,11 +400,11 @@ fn main() {
                         }
                         Q::Phrase((ts, ks)) => {
                             // docs holding every term, then the doc text decides
-                            let mut order: Vec<u32> = ts.windows(2).map(|w| pairs[&((w[0] as u64 + 1) << 32 | w[1] as u64)]).collect();
+                            let mut order: Vec<u32> = ts.clone(); order.sort_unstable(); order.dedup();
                             order.sort_by_key(|&t| dl(p, t).len());
                             let mut hit = dl(p, order[0]).to_vec();
                             for &t in &order[1..] { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
-                            if ts.len() > 2 { hit.retain(|&d| has(docs, p.doff[(d - p.lo) as usize] as usize, ks)); }
+                            if ts.len() > 1 { let short = ks.iter().all(|&k| k >> 127 == 0); hit.retain(|&d| { let at = p.doff[(d - p.lo) as usize] as usize; if short { has2(docs, at, ks, &lower) } else { has(docs, at, ks) } }); }
                             add(&mut cnt, &mut sum, &mut r, &hit);
                         }
                     }
@@ -440,4 +440,44 @@ fn map(path: &str) -> &'static [u8] {
 #[inline]
 fn put(b: &mut Vec<u16>, t: u32) {
     if t < 0xFFFE { b.push(t as u16) } else { b.extend_from_slice(&[0xFFFE, (t >> 16) as u16, t as u16]) }
+}
+
+// phrase check on the doc text: find the first word's first byte 16 at a time (case folded),
+// then match the words exactly as whole tokens through the lowercase table
+fn has2(docs: &[u8], start: usize, ks: &[u128], lower: &[u8; 256]) -> bool {
+    use std::arch::x86_64::*;
+    let word = |k: u128| { let l = 16 - (k.leading_zeros() / 8) as usize; (k.to_le_bytes(), l) };
+    let (w0, _) = word(ks[0]);
+    let at = |j: usize| -> bool {
+        let mut j = j;
+        for (n, &k) in ks.iter().enumerate() {
+            let (w, l) = word(k);
+            for m in 0..l { if lower[docs[j + m] as usize] != w[m] { return false; } }
+            j += l;
+            if lower[docs[j] as usize] != 0 { return false; }
+            if n + 1 < ks.len() { while lower[docs[j] as usize] == 0 { if docs[j] == b'\n' { return false; } j += 1; } }
+        }
+        true
+    };
+    let mut i = start + 1;
+    unsafe {
+        let (f, lf, fold) = (_mm_set1_epi8(w0[0] as i8), _mm_set1_epi8(b'\n' as i8), _mm_set1_epi8(0x20));
+        loop {
+            if i + 16 > docs.len() {
+                while i < docs.len() && docs[i] != b'\n' { if docs[i] | 0x20 == w0[0] && lower[docs[i - 1] as usize] == 0 && at(i) { return true; } i += 1; }
+                return false;
+            }
+            let x = _mm_loadu_si128(docs.as_ptr().add(i) as *const __m128i);
+            let mut m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_or_si128(x, fold), f)) as u32;
+            let e = _mm_movemask_epi8(_mm_cmpeq_epi8(x, lf)) as u32;
+            if e != 0 { m &= (1 << e.trailing_zeros()) - 1; }
+            while m != 0 {
+                let j = i + m.trailing_zeros() as usize;
+                m &= m - 1;
+                if lower[docs[j - 1] as usize] == 0 && at(j) { return true; }
+            }
+            if e != 0 { return false; }
+            i += 16;
+        }
+    }
 }
