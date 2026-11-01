@@ -12,7 +12,10 @@ fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u16], lo: u32) {
     for &d in x.iter().take(10 - r.len()) { r.push(lo + d as u32); }
 }
 
-const BLK: usize = 1 << 21; // u16 entries per block, each block sized up front so it never grows
+// u16 entries per block, each block sized up front so it never grows. 1 MB: over the mmap
+// threshold, so a block is its own mapping and goes back to the kernel when the fill frees it,
+// and under 2 MB, so a part-filled last block is not backed by a whole huge page
+const BLK: usize = 1 << 19;
 
 struct Part { lo: u32, lists: Vec<u16>, loff: Vec<u32>, doff: Vec<u32> }
 
