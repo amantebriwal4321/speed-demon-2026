@@ -88,3 +88,7 @@ Reverted (round 20): board run-8b01065c2da1 gave 0.0366 s but 27.9 MB, against 2
 
 ## Round 21: percentiles by selection
 Phase timers: the hour phase is 31 ms of 71 locally, and perf puts the group sorts at 12% of all CPU. Only three ranks of each group are printed, so p99 is selected first (select_nth_unstable), then p95 among the rows below it, then p50 below that, instead of sorting the group. 21 alternating runs: 0.074 -> 0.072 s at 4 threads, 0.105 -> 0.099 s with 12; CPU -5 to -9%. Exact on s7, s42, t5, full.
+
+## Round 22: output past the page cache (not kept)
+The summary (10 MB) sits in the page cache, which counts toward M, and each hour's row blocks are unmapped as it is processed (864 unmaps, each interrupting every core) to make room. Tried: summary.txt opened with O_DIRECT (whole 4 KB pages from an aligned buffer, the last page's padding cut with set_len, plain writes as the fallback) and the blocks kept until exit. Exact on all six sets and 4% faster, but the peak went 18-19 -> 27-29 MB: what the frees offset is mostly the finished hours waiting for an earlier hour to be written, not the page cache. Reverted.
+Also tried and dropped: sorting groups of up to 16, 32 or 64 rows instead of selecting (within noise either way).
