@@ -76,3 +76,10 @@ By the T^0.5 M^0.2 score that is about +0.5 points net. Exact on s7, s42, t5, fu
 
 ## x86-64-v3 build
 Same target-cpu config as A and D. Exact on s7, s42, t5, full. Local medians about 1-3% faster.
+
+## Round 10: dense terms straight to bitsets (not kept)
+Index build split in two: scan, then a global count picks the dense terms (over 1 doc in 32),
+and the fill writes those into shared atomic bitsets instead of lists (10.1M of 22.2M postings).
+Exact after fixing an overflow in the big-query test. But the peak stayed at 122 MB (it sits in
+the scan phase, where the u16 blocks hold every posting) and medians went 0.305 s -> 0.312 s.
+Kept in /workspace/b-rewrite only. To cut the peak, the scan itself has to stop emitting dense postings.
