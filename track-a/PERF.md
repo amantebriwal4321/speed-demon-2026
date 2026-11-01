@@ -49,6 +49,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 - Row blocks went from 16 KB to 64 KB. Since round 5 each block is its own mapping, so this cuts the mmap and munmap calls by 4x. A last block's untouched pages are never resident, so memory doesn't grow. Locally the median went from about 0.049 s to 0.045 s.
 
+## Round 9
+
+- Mapping endpoint names to global ids was a serial 4 ms: a sort of all threads' name slices (about 15k) and a binary search for each one. Now the distinct names go through a hash map, only the 1,842 get sorted, and each thread's ids are hash lookups. That step dropped to about 2.8 ms, and two rounds of 25 alternating runs gave 0.052 to 0.049 s and 0.051 to 0.048 s.
+
 ## Next ideas
 
 Radix sort per hour, and a faster integer formatter for the output.

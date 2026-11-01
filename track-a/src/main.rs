@@ -127,10 +127,15 @@ fn main() {
     });
 
     // global ids in byte order of the endpoint text
-    let mut all: Vec<&[u8]> = parts.iter().flat_map(|(e, _)| e.start.iter().zip(&e.len).map(|(&s, &l)| &b[s as usize..(s + l) as usize])).collect();
-    all.sort_unstable(); all.dedup();
+    // distinct names through a hash map, one sort of the 1,842, then each thread's ids mapped
+    let name = |e: &Eps, x: usize| -> &'static [u8] { &b[e.start[x] as usize..(e.start[x] + e.len[x]) as usize] };
+    let mut uniq: std::collections::HashMap<&[u8], u32> = std::collections::HashMap::with_capacity(4096);
+    for (e, _) in &parts { for x in 0..e.len.len() { uniq.entry(name(e, x)).or_insert(0); } }
+    let mut all: Vec<&[u8]> = uniq.keys().copied().collect();
+    all.sort_unstable();
+    for (r, k) in all.iter().enumerate() { *uniq.get_mut(k).unwrap() = r as u32; }
     let ne = all.len();
-    let maps: Vec<Vec<u32>> = parts.iter().map(|(e, _)| e.start.iter().zip(&e.len).map(|(&s, &l)| all.binary_search(&&b[s as usize..(s + l) as usize]).unwrap() as u32).collect()).collect();
+    let maps: Vec<Vec<u32>> = parts.iter().map(|(e, _)| (0..e.len.len()).map(|x| uniq[name(e, x)]).collect()).collect();
     let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(|(_, r)| std::sync::Mutex::new(r)).collect();
     let _ = &parts;
     let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });
