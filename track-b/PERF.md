@@ -207,3 +207,4 @@ callgrind on s7 counted about 118 instructions per token in the scan. Three cuts
 - key() packs a token of up to 16 bytes from one 16 byte load, lowercased with bit 5 and cut to its length by a sliding byte mask, instead of a copy and a 128-bit shift.
 - A token that runs to the end of a 64 byte window is finished in the next window's masks, which the scan goes on with, instead of byte by byte through the lowercase table.
 s7: 492M -> 451M instructions (-8%). 15 alternating runs: 651 -> 635 ms median, CPU flat; peak 57-58 MB as before. Exact on s7, s42, t5, full, h99, h3.
+Reverted (round 38): board run-714d2f47ce0f 0.2877 s and run-ec28d4f60b9a 0.2919 s, against 0.2287 and 0.2445 s for round 36 just before. Fewer instructions locally, but clearly slower on the scoring box, so the scan goes back to round 36.
