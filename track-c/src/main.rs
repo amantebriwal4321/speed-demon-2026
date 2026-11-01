@@ -98,9 +98,9 @@ fn main() {
     // one name table shared by all threads, filled with CAS. A slot is
     // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
-    let table: Vec<AtomicU64> = zeroed(SLOTS);
+    let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let words = SLOTS / 64;
-    let seen: Vec<AtomicU64> = zeroed(ng * words);
+    let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
@@ -178,13 +178,6 @@ fn main() {
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/aggregates.txt"), o).unwrap();
     std::process::exit(0);
-}
-
-// n zeroed atomics straight from calloc: the kernel hands out zero pages, so nothing is
-// written up front on one thread, and the pages fault in on the threads that use them
-fn zeroed<T>(n: usize) -> Vec<T> {
-    let l = std::alloc::Layout::array::<T>(n.max(1)).unwrap();
-    unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(l) as *mut T, n, n.max(1)) }
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap

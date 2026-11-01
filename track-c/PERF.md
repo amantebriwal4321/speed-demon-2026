@@ -90,3 +90,4 @@ The region table held codes in one 2 MB array and ranks in a second one, both al
 
 ## Round 14: zeroed tables from calloc
 The name table and the seen bits (5 MB) were filled with zeros on the main thread before the parse; they now come from `alloc_zeroed`, so the kernel's zero pages fault in on the threads that use them. 21 alternating runs: -1% at 4 threads, -3% with 12 threads forced. Exact on s7, s42, t5, full; peak 8 MB both.
+Reverted (round 15): board run-f613fe81dbf3 measured 0.0836 s and 20.7 MB for rounds 13 + 14. Not reproduced locally (8-10 MB, even with THP `always`), but round 14 is the one that changed how the big tables get their pages, so it goes; round 13 stays.

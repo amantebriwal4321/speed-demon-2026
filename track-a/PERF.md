@@ -82,3 +82,4 @@ The local profile was about a quarter kernel time, including TLB-shootdown IPIs.
 - blocks mapped but never unmapped: only -8%, and peak 28 MB;
 - kept: heaps during the parse, then the 16 KB threshold again before the hours, so the hours' buffers are their own mappings: 0.099 -> 0.075 s (-25%), CPU -12%, peak 18-19 -> 22-23 MB.
 Exact on s7, s42, t5, full, also with 12 threads.
+Reverted (round 20): board run-8b01065c2da1 gave 0.0366 s but 27.9 MB, against 21-22 MB. The board backs heap memory with 2 MB pages (locally with THP `always` the peak goes 18-20 -> 24 MB), and the time gain did not show beyond the run-to-run spread.
