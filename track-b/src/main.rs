@@ -127,18 +127,6 @@ fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
     let qb = map(&format!("{data}/queries.txt"));
-    let docs = map(&format!("{data}/docs.txt"));
-    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    let mut cuts = vec![0usize];
-    for k in 1..nt {
-        let mut p = (docs.len() * k / nt).max(*cuts.last().unwrap());
-        while p < docs.len() && p > 0 && docs[p - 1] != b'\n' { p += 1; }
-        cuts.push(p);
-    }
-    cuts.push(docs.len());
-    // while this thread reads the queries, the others map the docs in: MADV_POPULATE_READ sets
-    // up a share's page table entries in one go, so the scan later takes no page faults
-    let pre: Vec<_> = (0..nt).map(|k| { let d = &docs[cuts[k]..cuts[k + 1]]; std::thread::spawn(move || populate(d)) }).collect();
 
     // queries first: only the terms they use get indexed.
     // The queries, flat: a BOOL query is a range of (op, term) pairs in `ops`, a phrase a range
@@ -181,6 +169,15 @@ fn main() {
     let cap = keys.len();
     let shift = 128 - cap.trailing_zeros();
     let h = |k: u128| (hm(k) >> (shift - 64)) as usize;
+    let docs = map(&format!("{data}/docs.txt"));
+    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let mut cuts = vec![0usize];
+    for k in 1..nt {
+        let mut p = (docs.len() * k / nt).max(*cuts.last().unwrap());
+        while p < docs.len() && p > 0 && docs[p - 1] != b'\n' { p += 1; }
+        cuts.push(p);
+    }
+    cuts.push(docs.len());
     let mut lower = [0u8; 256]; // 0 = separator, else the lowercased byte
     for c in b'a'..=b'z' { lower[c as usize] = c; }
     for c in b'0'..=b'9' { lower[c as usize] = c; }
@@ -235,7 +232,6 @@ fn main() {
     let short = Probe::<2>::new(keys.iter().zip(&vals).filter(|e| *e.0 != 0 && *e.0 >> 64 == 0).map(|(&k, &v)| (k, v)));
     let longer = Probe::<4>::new(keys.iter().zip(&vals).filter(|e| *e.0 >> 64 != 0).map(|(&k, &v)| (k, v)));
     drop((keys, vals));
-    for h in pre { h.join().unwrap(); }
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
@@ -543,14 +539,6 @@ impl<const W: usize> Probe<W> {
 fn zeroed<T>(n: usize) -> Vec<T> {
     let l = std::alloc::Layout::array::<T>(n.max(1)).unwrap();
     unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(l) as *mut T, n, n.max(1)) }
-}
-
-// MADV_POPULATE_READ on the pages of `b`: every page table entry set up at once, from the page
-// cache (a kernel without it says EINVAL and the pages fault in as they are read instead)
-fn populate(b: &[u8]) {
-    extern "C" { fn madvise(a: *mut u8, l: usize, advice: i32) -> i32; }
-    let a = b.as_ptr() as usize & !4095;
-    if !b.is_empty() { unsafe { madvise(a as *mut u8, b.as_ptr() as usize + b.len() - a, 22) }; }
 }
 
 // MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
