@@ -426,27 +426,24 @@ fn main() {
         })
         .collect();
     let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
-    // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
-    // slot holds the whole token and its value and a lookup is one access
-    let short = Probe::<2>::new(
-        keys.iter()
-            .zip(&vals)
-            .filter(|e| *e.0 != 0 && *e.0 >> 64 == 0)
-            .map(|(&k, &v)| (k, v)),
-    );
-    let longer = Probe::<4>::new(
-        keys.iter()
-            .zip(&vals)
-            .filter(|e| *e.0 >> 64 != 0)
-            .map(|(&k, &v)| (k, v)),
-    );
-    drop((keys, vals));
+    let terms: Vec<(u128, u128, u32)> = keys
+        .iter()
+        .zip(&vals)
+        .filter(|e| *e.0 != 0)
+        .map(|(&k, &v)| (k, 0, v))
+        .chain(
+            long.iter()
+                .map(|(w, &v)| (pack(w, 16), pack(&w[16..], w.len() - 16), v)),
+        )
+        .collect();
+    let fpt = Fp::new(&terms);
+    drop((keys, vals, terms));
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 let c = &docs[cuts[k]..cuts[k + 1]];
                 let base = cuts[k];
-                let (short, longer, long, lower, abits) = (&short, &longer, &long, &lower, &abits);
+                let (fpt, lower, abits) = (&fpt, &lower, &abits);
                 sc.spawn(move || {
                     let mut p = Part {
                         lo: u32::MAX,
@@ -535,12 +532,7 @@ fn main() {
                                 }
                             }};
                         }
-                        let lookup = |p: (u8, u128, usize, Option<u32>)| match p.0 {
-                            1 => short.get(p.1, p.2),
-                            3 => longer.get(p.1, p.2),
-                            _ => p.3,
-                        };
-                        let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
+                        let mut pend: Option<u64> = None;
                         // token and LF bitmasks of a 64 byte window, then walk the bits
                         let mut o = 64; // offset inside the current window, 64 = need a new one
                         let (mut tm, mut nm) = (0u64, 0u64);
@@ -559,8 +551,8 @@ fn main() {
                             i += z;
                             o += z;
                             if nm >> o & 1 == 1 {
-                                if pend.0 != 0 {
-                                    handle!(lookup(pend));
+                                if let Some(h) = pend {
+                                    handle!(fpt.get(h));
                                 }
                                 break;
                             }
@@ -575,27 +567,14 @@ fn main() {
                                 o = 64;
                             }
                             let l = i - s;
-                            // a short token's slot is prefetched and looked up one token later, so the
+                            // a token's bucket is prefetched and looked up one token later, so the
                             // table miss overlaps the scan of the next token
-                            let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
-                                let k = pack(&docs[base + s..], l);
-                                (1, k, short.at(k), None)
-                            } else if l <= 16 {
-                                let k = pack(&docs[base + s..], l);
-                                (3, k, longer.at(k), None)
-                            } else if l <= 32 {
-                                let mut t = [0u8; 32];
-                                for (a, &b) in t.iter_mut().zip(&c[s..i]) {
-                                    *a = lower[b as usize];
+                            if l <= 32 {
+                                let h = fpt.at(&docs[base + s..], l);
+                                if let Some(h) = pend.replace(h) {
+                                    handle!(fpt.get(h));
                                 }
-                                (2, 0, 0, long.get(&t[..l]).copied())
-                            } else {
-                                (2, 0, 0, None)
-                            };
-                            if pend.0 != 0 {
-                                handle!(lookup(pend));
                             }
-                            pend = nx;
                         }
                         i += 1;
                     }
@@ -612,7 +591,7 @@ fn main() {
             .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    drop((short, longer));
+    drop(fpt);
     // the common terms are already in bitsets of all docs and get no list, which leaves out
     // nearly half the postings
     // the fill runs in two waves: a part's blocks and its lists are both alive while it fills,
@@ -907,75 +886,101 @@ fn main() {
     std::process::exit(0);
 }
 
-// open addressing on a packed token: W = 2 holds tokens of up to 8 bytes as [bytes, value],
-// W = 4 longer ones as [low bytes, high bytes, value, 0]. The slots come zeroed and page
-// aligned from mmap, so none straddles a cache line, and are asked for 2 MB pages, so
-// random probes don't miss the TLB.
-struct Probe<const W: usize> {
-    s: &'static mut [[u64; W]],
-    sh: u32,
+// the scan's table: every query term by a 64-bit hash of its bytes, in buckets of one cache
+// line holding eight slots of (44-bit fingerprint, 20-bit term id). That is about 1 MB for 75k
+// terms, small enough to stay in a core's cache, where the exact keys took 4 MB, and a lookup
+// compares a bucket's eight fingerprints at once. Two tokens that differ agree on bucket and
+// fingerprint with odds of about 2^-56; over the ~600k distinct tokens of the corpus against
+// the ~75k terms that is about one run in 10^6 (track C tells names apart the same way).
+// Two query terms that agree are caught while building, and the hash then takes a new seed.
+#[repr(align(64))]
+#[derive(Clone, Copy)]
+struct Bucket([u64; 8]);
+struct Fp {
+    b: Vec<Bucket>,
+    seed: u64,
 }
-// unmapped as soon as the scan is done, so the tables are gone before the fill's peak
-impl<const W: usize> Drop for Probe<W> {
-    fn drop(&mut self) {
-        extern "C" {
-            fn munmap(a: *mut u8, l: usize) -> i32;
-        }
-        unsafe { munmap(self.s.as_mut_ptr() as *mut u8, self.s.len() * 8 * W) };
-    }
-}
-impl<const W: usize> Probe<W> {
-    fn new(items: impl Iterator<Item = (u128, u32)> + Clone) -> Self {
-        extern "C" {
-            fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8;
-            fn madvise(a: *mut u8, l: usize, advice: i32) -> i32;
-        }
-        let cap = (2 * items.clone().count()).next_power_of_two().max(16);
-        let s = unsafe {
-            let a = mmap(std::ptr::null_mut(), cap * 8 * W, 3, 0x22, -1, 0); // read/write, private anonymous
-            madvise(a, cap * 8 * W, 14); // MADV_HUGEPAGE
-            std::slice::from_raw_parts_mut(a as *mut [u64; W], cap)
-        };
-        let p = Probe {
-            s,
-            sh: 64 - cap.trailing_zeros(),
-        };
-        for (k, v) in items {
-            let mut j = p.at(k);
-            while p.s[j][0] != 0 {
-                j = (j + 1) & (cap - 1);
+impl Fp {
+    // terms as (first 16 bytes packed, next 16 bytes packed, id)
+    fn new(terms: &[(u128, u128, u32)]) -> Self {
+        let nb = (terms.len() / 5 + 1).next_power_of_two();
+        'seed: for seed in 0.. {
+            let mut b = vec![Bucket([0; 8]); nb];
+            for &(x, y, id) in terms {
+                assert!(id < 1 << 20);
+                let h = h64(seed, x, y);
+                let mut j = h as usize & (nb - 1);
+                loop {
+                    if b[j].0.iter().any(|&e| e >> 20 == h >> 20 | 1) {
+                        continue 'seed;
+                    }
+                    if let Some(e) = b[j].0.iter_mut().find(|e| **e == 0) {
+                        *e = (h >> 20 | 1) << 20 | id as u64;
+                        break;
+                    }
+                    j = (j + 1) & (nb - 1);
+                }
             }
-            p.s[j][0] = k as u64;
-            if W == 4 {
-                p.s[j][1] = (k >> 64) as u64;
-            }
-            p.s[j][W / 2] = v as u64;
+            return Fp { b, seed };
         }
-        p
+        unreachable!()
     }
-    // the home slot, prefetched: the lookup comes one token later
-    fn at(&self, k: u128) -> usize {
-        let j = (hm(k) >> self.sh) as usize;
+    // the hash of a token of l bytes at b (letters lowercased), its bucket prefetched: the
+    // lookup comes one token later
+    fn at(&self, b: &[u8], l: usize) -> u64 {
+        let h = if l <= 16 {
+            h64(self.seed, pack(b, l), 0)
+        } else {
+            h64(self.seed, pack(b, 16), pack(&b[16..], l - 16))
+        };
+        let j = h as usize & (self.b.len() - 1);
         unsafe {
             std::arch::x86_64::_mm_prefetch(
-                self.s.as_ptr().add(j) as *const i8,
+                self.b.as_ptr().add(j) as *const i8,
                 std::arch::x86_64::_MM_HINT_T0,
             )
         };
-        j
+        h
     }
-    fn get(&self, k: u128, mut j: usize) -> Option<u32> {
+    fn get(&self, h: u64) -> Option<u32> {
+        use std::arch::x86_64::*;
+        let f = h >> 20 | 1;
+        let mut j = h as usize & (self.b.len() - 1);
         loop {
-            let e = &self.s[j];
-            if e[0] == 0 {
+            let e = &self.b[j].0;
+            // bit i of m: slot i holds fingerprint f
+            let m = unsafe {
+                let (p, f) = (e.as_ptr() as *const __m256i, _mm256_set1_epi64x(f as i64));
+                let eq = |q| _mm256_castsi256_pd(_mm256_cmpeq_epi64(_mm256_srli_epi64(q, 20), f));
+                _mm256_movemask_pd(eq(_mm256_load_si256(p)))
+                    | _mm256_movemask_pd(eq(_mm256_load_si256(p.add(1)))) << 4
+            };
+            if m != 0 {
+                return Some((e[m.trailing_zeros() as usize] & 0xF_FFFF) as u32);
+            }
+            if e[7] == 0 {
                 return None;
             }
-            if e[0] == k as u64 && (W == 2 || e[1] == (k >> 64) as u64) {
-                return Some(e[W / 2] as u32);
-            }
-            j = (j + 1) & (self.s.len() - 1);
+            j = (j + 1) & (self.b.len() - 1);
         }
     }
+}
+
+// 64-bit hash of a token's two packed 16-byte halves (the second is 0 for up to 16 bytes):
+// two rounds of a 64x64->128 multiply folded in half
+fn h64(seed: u64, a: u128, b: u128) -> u64 {
+    let m = |x: u64, y: u64| {
+        let p = x as u128 * y as u128;
+        (p >> 64) as u64 ^ p as u64
+    };
+    let x = m(
+        a as u64 ^ 0x243F_6A88_85A3_08D3 ^ seed,
+        (a >> 64) as u64 ^ 0x1319_8A2E_0370_7344,
+    );
+    m(
+        x ^ b as u64 ^ 0xA409_3822_299F_31D0,
+        (b >> 64) as u64 ^ 0x082E_FA98_EC4E_6C89,
+    )
 }
 
 // n zeroed atomics straight from calloc: the kernel hands out zero pages, so nothing is
