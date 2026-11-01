@@ -26,16 +26,16 @@ fn num(b: &[u8], i: &mut usize) -> u32 {
     v
 }
 
-// distances of the nodes a search has reached, in a small open addressing table. A query
-// reaches about 4k nodes on average, so this stays near 100 KB per side instead of a dense
-// array over all nodes for every thread. Values are u32, with the rare one above 2^32 - 3
-// kept in a side map.
+// distances of the nodes a search has reached, in a small open addressing table that starts
+// at 1K slots (8 KB) and grows: half the searches pop under 130 nodes, and two such tables a
+// thread, next to a hyperthread's, stay in L1 and L2. Values are u32, with the rare one above
+// 2^32 - 3 kept in a side map.
 const SPILL: u32 = u32::MAX - 1;
 // slot = node << 32 | dist, all ones when empty: key and value share one load
 struct Dist { t: Vec<u64>, len: usize, big: std::collections::HashMap<u32, u64>, used: Vec<u32> }
 const E: u64 = u64::MAX;
 impl Dist {
-    fn new() -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default(), used: Vec::new() } }
+    fn new() -> Self { Dist { t: vec![E; 1 << 10], len: 0, big: Default::default(), used: Vec::new() } }
     #[inline]
     fn slot(&self, v: u32) -> usize {
         let m = self.t.len() - 1;
@@ -308,8 +308,6 @@ fn main() {
                             if tf.saturating_add(tb) >= best { break; }
                             let side = if heap[0].len() <= heap[1].len() { 0 } else { 1 };
                             let lim = if side == 0 { tb } else { tf };
-                            // a stale entry (6% of pops) is not skipped: its node's smaller entry came
-                            // out first and relaxed every edge, so it improves nothing
                             let (d, u) = heap[side].pop();
                             let (o, a) = g[side];
                             let [df, db] = &mut dist;
