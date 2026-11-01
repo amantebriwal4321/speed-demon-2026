@@ -175,3 +175,7 @@ At the fill peak, w waves keep about 24/w MB of lists alive on top of the 61 MB 
 
 ## Round 31: common-term cutoff at 1 in 24
 With the fill spike gone, the peak is where the scan ends: the blocks plus the bitsets. A term near the old cutoff (1 doc in 48 of the sample, about 5,200 docs) costs 31 KB as a bitset but about 14 KB as postings plus a third of its list. 12 threads forced, three runs each: cutoff 48: 66 MB; 32: 61-63; 24: 61-62; 16: 62. Time, 11 alternating runs: 24 beats 48 (0.590 -> 0.557 s) and 32 (0.600 -> 0.568 s); 16 is slower in the queries (+14 ms). Exact on s7, s42, t5, full.
+Rounds 30 + 31 on the board: run-14c0632534ec 0.2509 s, 67.1 MB, 66.25 points (a new best, rank 24); run-c5579e17d545 0.2566 s, 67.2 MB. Memory went 75.9 -> 67 MB as expected, but both times are a few percent above round 29's 0.2433 s.
+
+## Round 32: two waves with the 1-in-24 cutoff (board experiment)
+To see whether the third wave is what costs the time on 12 real cores, this keeps the 1-in-24 cutoff and goes back to two waves. Exact on s7, s42, t5, full.
