@@ -169,6 +169,9 @@ fn main() {
     for (r, &g) in order.iter().enumerate() { rank[g as usize] = r as u32; }
     for m in maps.iter_mut() { for g in m.iter_mut() { *g = rank[*g as usize]; } }
     let ne = all.len();
+    // the most text one hour can have: every endpoint, with six numbers of up to 20 digits.
+    // An hour's buffer gets that up front, so it never moves; untouched pages cost nothing
+    let most: usize = all.iter().map(|e| 21 + e.len() + 6 * 21 + 1).sum();
     // thread pi's rows of hour h, and its side rows
     let rows_of = |pi: usize, h: usize| (unsafe { std::slice::from_raw_parts(rows.region(h, pi), counts[pi][h]) }, &sides[pi][h]);
 
@@ -211,7 +214,7 @@ fn main() {
                     }
                     drop(rs);
                     rows.free(h); // the hour's pages go back while the output grows in the page cache
-                    let mut o = Vec::with_capacity(ne * 48);
+                    let mut o = Vec::with_capacity(most);
                     let hdr: [u8; 21] = format!("{date}T{hh:02}:00:00Z ").into_bytes().try_into().unwrap();
                     for g in 0..ne {
                         let (s, t) = (cnt[g] as usize, cnt[g + 1] as usize);
