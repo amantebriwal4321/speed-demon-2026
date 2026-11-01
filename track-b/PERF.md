@@ -110,3 +110,6 @@ Lists hold doc ids local to their part as u16 (the part adds lo when it hands id
 
 ## Round 16: scalar phrase scan (not kept)
 Replacing the SSE2 first-byte scan in has2 with a byte loop cuts 6 lines but is 8-11% slower in three paired runs. Reverted.
+
+## Round 17: query terms straight into the scan table
+Reading the 50,000 queries took 20-36 ms: a HashMap of 86k distinct words hit with 300k lookups, then rebuilt into the u128 table. Terms now go straight into the open-addressing u128 table (grown at half full, same final size), long ones into a small map, so there is no second build. Exact on s7, s42, t5, full; paired medians 0.329/0.326/0.306 -> 0.305/0.296/0.285 s, peak 82 -> 79 MB.
