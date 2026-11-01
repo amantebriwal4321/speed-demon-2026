@@ -131,16 +131,32 @@ fn main() {
     });
 
     // global ids in byte order of the endpoint text
-    // distinct names through a hash map, one sort of the 1,842, then each thread's ids mapped
+    // every thread's endpoints go into one table, hashed on the keys the threads already have
+    // (first and last 8 bytes, length) and compared on the text; the distinct names are then
+    // sorted once and each thread's ids mapped to their rank
     fn name(e: &Eps, x: usize) -> &[u8] { &e.text[e.start[x] as usize..(e.start[x] + e.len[x]) as usize] }
     let (eps, parts): (Vec<Eps>, Vec<Vec<Hr>>) = parts.into_iter().unzip();
-    let mut uniq: std::collections::HashMap<&[u8], u32> = std::collections::HashMap::with_capacity(4096);
-    for e in &eps { for x in 0..e.len.len() { uniq.entry(name(e, x)).or_insert(0); } }
-    let mut all: Vec<&[u8]> = uniq.keys().copied().collect();
-    all.sort_unstable();
-    for (r, k) in all.iter().enumerate() { *uniq.get_mut(k).unwrap() = r as u32; }
+    let cap = (2 * eps.iter().map(|e| e.len.len()).sum::<usize>()).next_power_of_two().max(16);
+    let mut slot = vec![u32::MAX; cap];
+    let mut first: Vec<(usize, usize)> = Vec::new(); // (thread, its id) of each distinct name
+    let mut maps: Vec<Vec<u32>> = eps.iter().enumerate().map(|(pi, e)| (0..e.len.len()).map(|x| {
+        let (w0, w1, l) = e.key[x];
+        let mut s = (w0.wrapping_mul(0x9E3779B97F4A7C15) ^ w1.wrapping_mul(0xC2B2AE3D27D4EB4F) ^ (l as u64).wrapping_mul(0x165667B19E3779F9)) as usize >> 7 & (cap - 1);
+        loop {
+            let g = slot[s];
+            if g == u32::MAX { let n = first.len() as u32; slot[s] = n; first.push((pi, x)); break n; }
+            let (qi, y) = first[g as usize];
+            if eps[qi].key[y] == e.key[x] && name(&eps[qi], y) == name(e, x) { break g; }
+            s = (s + 1) & (cap - 1);
+        }
+    }).collect()).collect();
+    let mut order: Vec<u32> = (0..first.len() as u32).collect();
+    order.sort_unstable_by_key(|&g| name(&eps[first[g as usize].0], first[g as usize].1));
+    let all: Vec<&[u8]> = order.iter().map(|&g| name(&eps[first[g as usize].0], first[g as usize].1)).collect();
+    let mut rank = vec![0u32; first.len()];
+    for (r, &g) in order.iter().enumerate() { rank[g as usize] = r as u32; }
+    for m in maps.iter_mut() { for g in m.iter_mut() { *g = rank[*g as usize]; } }
     let ne = all.len();
-    let maps: Vec<Vec<u32>> = eps.iter().map(|e| (0..e.len.len()).map(|x| uniq[name(e, x)]).collect()).collect();
     let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(std::sync::Mutex::new).collect();
     let _ = &parts;
     let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });
