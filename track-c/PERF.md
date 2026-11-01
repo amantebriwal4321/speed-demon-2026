@@ -74,3 +74,11 @@ Same target-cpu config as A and D. Exact on s7, s42, t5, full. Local medians abo
 
 ## Round 11: less code
 The Hasher impl became one fx() function, the 8-byte tail of find() went (position() covers it), and the POP mmap switch went. rustfmt lines 373 -> 337. Exact on s7, s42, t5, full; medians the same.
+
+## Round 12: more records in flight
+Profiled on 4 cores: the hottest load in the record loop (37% of it) was `lookup[rid]`, a random read into the 2 MB region table that was never prefetched, and the next was the atomic OR into the 4 MB of seen bits (22%), prefetched only one record ahead.
+- A parsed record now prefetches its region entry and its name slot and waits one record for its country; it then gets its aggregate and a prefetch of its seen word, and waits four more records for the name insert and the OR. Depth 4 beat 1, 2, 8 and 16 for the inserts; waiting more than one record for the country was slower. A two-queue version was 3-8% slower than an Option for the first wait.
+- The BOM test at each record start was a `starts_with`, which compiled to a `memcmp` call (7% of samples); it is three byte compares now.
+- Tried and dropped: the three tables on 2 MB pages (-4% time but the peak went 9 -> 13 MB, a loss with M^0.2), and MADV_POPULATE_READ on each thread's part of the file (page faults are 12% of CPU, but it moved -1.7%, inside the noise).
+- A record is a one-record `Agg`, merged with the same `merge` the totals use.
+Exact on s7, s42, t5, full. Against round 11, 15 alternating runs: 0.149 -> 0.119 s (-20%), CPU 0.49 -> 0.39 s, peak 9 MB both. rustfmt lines 361 -> 390.
