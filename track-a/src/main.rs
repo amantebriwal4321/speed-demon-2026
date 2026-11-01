@@ -31,9 +31,11 @@ const TB: usize = 1 << 13;
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    // blocks of 16 KB and up get their own mmap, so a freed hour really leaves the process
+    // the parse takes its row blocks from the malloc heaps: a mapping per block costs an mmap
+    // that locks out every other thread's page faults. The hours below get their own
+    // mappings for anything from 16 KB up instead, so what they free leaves the process.
     extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
-    unsafe { mallopt(-3, 16 * 1024 - 64) }; // M_MMAP_THRESHOLD
+    unsafe { mallopt(-3, 64 << 20) }; // M_MMAP_THRESHOLD
     let b = map(&format!("{data}/requests.log"));
     // method length from its first two bytes
     let mut mlen = vec![0u8; 1 << 16];
@@ -138,6 +140,7 @@ fn main() {
     for (r, k) in all.iter().enumerate() { *uniq.get_mut(k).unwrap() = r as u32; }
     let ne = all.len();
     let maps: Vec<Vec<u32>> = eps.iter().map(|e| (0..e.len.len()).map(|x| uniq[name(e, x)]).collect()).collect();
+    unsafe { mallopt(-3, 16 * 1024 - 64) };
     let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(std::sync::Mutex::new).collect();
     let _ = &parts;
     let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });

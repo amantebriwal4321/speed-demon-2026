@@ -75,3 +75,10 @@ Lines parsed into batches of 16 or 64, lookups run per batch so they can overlap
 ## Round 18: endpoint names compared in cache
 perf on 4 cores put `memcmp` at 8.8% of samples: an endpoint over 16 bytes that matched a slot's hash words was compared byte for byte against its first line, somewhere random in the 239 MB file, so most of those compares missed to memory. Each thread now copies an endpoint's text into its own small arena when it first sees it (1,842 names, about 55 KB), and the compare and the later name sort read from there. Exact on s7, s42, t5, full. Paired, 21 alternating runs, twice: 0.095 -> 0.084 s and 0.094 -> 0.088 s, CPU -5 to -11%; cgroup peak 15-16 MB both. rustfmt lines 385 -> 386.
 Board: run-d5ef932cf47c, 0.0379 s, 22.1 MB, 76.97 points; the old code ran 0.0366 to 0.046 s, so one run cannot tell.
+
+## Round 19: row blocks from the malloc heaps during the parse
+The local profile was about a quarter kernel time, including TLB-shootdown IPIs. With the mmap threshold at 16 KB, every 64 KB row block was its own mmap (about one per thread and hour, 864 and up) and later its own munmap. An mmap takes the address space lock for writing, which stalls every other thread's page faults, and each munmap interrupts every core the process runs on. Measured with 12 threads forced on 4 cores, 21 alternating runs:
+- blocks from the heaps for the whole run: 0.105 -> 0.077 s, but peak 19 -> 25 MB (the hours' buffers and freed blocks pile up across the threads' arenas);
+- blocks mapped but never unmapped: only -8%, and peak 28 MB;
+- kept: heaps during the parse, then the 16 KB threshold again before the hours, so the hours' buffers are their own mappings: 0.099 -> 0.075 s (-25%), CPU -12%, peak 18-19 -> 22-23 MB.
+Exact on s7, s42, t5, full, also with 12 threads.
