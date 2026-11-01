@@ -363,105 +363,111 @@ fn main() {
     let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
     let tlen = |t: usize| if t < nd { 4 * nw } else { parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>() };
     let bs = |t: u32| { let t = t as usize; (t < nd).then(|| &bits[t * nw..(t + 1) * nw]) };
-    let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
+    // queries are handed out RUN at a time, and a run's answers go into one buffer
+    const RUN: usize = 64;
+    let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len().div_ceil(RUN)).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
             let (mut acc, mut tmp) = (Vec::<u64>::new(), Vec::<u64>::new());
             let (mut x, mut y) = (Vec::<u16>::new(), Vec::<u16>::new());
+            let mut r = Vec::with_capacity(10);
             loop {
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                if k >= qs.len() { break; }
-                // parts cover disjoint, ascending doc ranges, so each query runs per part
-                // and the per part answers just concatenate
-                // only the count, the sum and the first ten ids are printed
-                let (mut cnt, mut sum, mut r) = (0usize, 0u64, Vec::with_capacity(10));
-                let big = use_bits && match &qs[k] {
-                    Q::Bool(v) => v.iter().map(|&(_, t)| tlen(t as usize)).sum::<usize>() > 2 * nw,
-                    _ => false,
-                };
-                if big {
-                    if acc.is_empty() { acc = vec![0; nw]; tmp = vec![0; nw]; }
-                    let Q::Bool(v) = &qs[k] else { unreachable!() };
-                    match bs(v[0].1) {
-                        Some(b) => acc.copy_from_slice(b),
-                        None => for p in &parts { for d in dl(p, v[0].1).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
-                    }
-                    for &(op, t) in &v[1..] {
-                        if let Some(b) = bs(t) {
-                            match op {
-                                1 => for (a, &x) in acc.iter_mut().zip(b) { *a &= x },
-                                2 => for (a, &x) in acc.iter_mut().zip(b) { *a |= x },
-                                _ => for (a, &x) in acc.iter_mut().zip(b) { *a &= !x },
-                            }
-                            continue;
-                        }
-                        match op {
-                            1 => {
-                                for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { if acc[d as usize >> 6] >> (d & 63) & 1 == 1 { tmp[d as usize >> 6] |= 1 << (d & 63); } } }
-                                std::mem::swap(&mut acc, &mut tmp);
-                                tmp.fill(0);
-                            }
-                            2 => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
-                            _ => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
-                        }
-                    }
-                    // count and sum word by word: bit k of a position is set on the positions
-                    // in mask k, so the positions of a word sum to the popcounts under the masks
-                    // shifted by k; only the first ten ids are pulled out one by one
-                    const M: [u64; 6] = [0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F0F0_F0F0_F0F0, 0xFF00_FF00_FF00_FF00, 0xFFFF_0000_FFFF_0000, 0xFFFF_FFFF_0000_0000];
-                    for w in 0..nw {
-                        let mut b = std::mem::take(&mut acc[w]);
-                        if b == 0 { continue; }
-                        cnt += b.count_ones() as usize;
-                        sum += (b.count_ones() as usize * w * 64) as u64 + (0..6).map(|k| ((b & M[k]).count_ones() as u64) << k).sum::<u64>();
-                        while b != 0 && r.len() < 10 { r.push((w * 64) as u32 + b.trailing_zeros()); b &= b - 1; }
-                    }
-                }
-                // a phrase's terms are sorted out once, not per part: the rarest word anchors the
-                // text check, the common ones are tested on their bitsets, the rest are ANDed
-                // shortest first
-                let (mut anchor, mut dn, mut ld) = (0, Vec::new(), Vec::new());
-                if let Q::Phrase(ts, ks) = &qs[k] {
-                    anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
-                    let mut order: Vec<u32> = ts.to_vec();
-                    order.sort_unstable();
-                    order.dedup();
-                    (dn, ld) = order.into_iter().partition(|&t| (t as usize) < nd);
-                    ld.sort_by_key(|&t| tlen(t as usize));
-                }
-                for p in parts.iter().filter(|_| !big) {
-                    match &qs[k] {
-                        Q::Bool(v) => {
-                            x.clear();
-                            x.extend_from_slice(dl(p, v[0].1));
-                            for &(op, t) in &v[1..] {
-                                match op { 1 => and(&x, dl(p, t), &mut y), 2 => or(&x, dl(p, t), &mut y), _ => not(&x, dl(p, t), &mut y) }
-                                std::mem::swap(&mut x, &mut y);
-                            }
-                            add(&mut cnt, &mut sum, &mut r, &x, p.lo);
-                        }
-                        Q::Phrase(ts, ks) => {
-                            // docs holding every term, then the doc text decides
-                            let hit = &mut x;
-                            hit.clear();
-                            match ld.first() {
-                                Some(&t0) => hit.extend_from_slice(dl(p, t0)),
-                                None => hit.extend((0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16)),
-                            }
-                            for &t in ld.iter().skip(1) { if hit.is_empty() { break; } and(hit, dl(p, t), &mut y); std::mem::swap(hit, &mut y); }
-                            if !ld.is_empty() { hit.retain(|&x| { let d = p.lo + x as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }); }
-                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, anchor, &lower)); }
-                            add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
-                        }
-                    }
-                }
+                let b = next.fetch_add(1, Ordering::Relaxed);
+                if b * RUN >= qs.len() { break; }
                 let mut o = Vec::new();
-                write!(o, "{} {}", cnt, sum).unwrap();
-                for x in r.iter().take(10) { write!(o, " {x}").unwrap(); }
-                o.push(b'\n');
-                res[k].set(o).ok();
+                for k in b * RUN..((b + 1) * RUN).min(qs.len()) {
+                    // parts cover disjoint, ascending doc ranges, so each query runs per part
+                    // and the per part answers just concatenate
+                    // only the count, the sum and the first ten ids are printed
+                    let (mut cnt, mut sum) = (0usize, 0u64);
+                    r.clear();
+                    let big = use_bits && match &qs[k] {
+                        Q::Bool(v) => v.iter().map(|&(_, t)| tlen(t as usize)).sum::<usize>() > 2 * nw,
+                        _ => false,
+                    };
+                    if big {
+                        if acc.is_empty() { acc = vec![0; nw]; tmp = vec![0; nw]; }
+                        let Q::Bool(v) = &qs[k] else { unreachable!() };
+                        match bs(v[0].1) {
+                            Some(b) => acc.copy_from_slice(b),
+                            None => for p in &parts { for d in dl(p, v[0].1).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                        }
+                        for &(op, t) in &v[1..] {
+                            if let Some(b) = bs(t) {
+                                match op {
+                                    1 => for (a, &x) in acc.iter_mut().zip(b) { *a &= x },
+                                    2 => for (a, &x) in acc.iter_mut().zip(b) { *a |= x },
+                                    _ => for (a, &x) in acc.iter_mut().zip(b) { *a &= !x },
+                                }
+                                continue;
+                            }
+                            match op {
+                                1 => {
+                                    for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { if acc[d as usize >> 6] >> (d & 63) & 1 == 1 { tmp[d as usize >> 6] |= 1 << (d & 63); } } }
+                                    std::mem::swap(&mut acc, &mut tmp);
+                                    tmp.fill(0);
+                                }
+                                2 => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                                _ => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
+                            }
+                        }
+                        // count and sum word by word: bit k of a position is set on the positions
+                        // in mask k, so the positions of a word sum to the popcounts under the masks
+                        // shifted by k; only the first ten ids are pulled out one by one
+                        const M: [u64; 6] = [0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F0F0_F0F0_F0F0, 0xFF00_FF00_FF00_FF00, 0xFFFF_0000_FFFF_0000, 0xFFFF_FFFF_0000_0000];
+                        for w in 0..nw {
+                            let mut b = std::mem::take(&mut acc[w]);
+                            if b == 0 { continue; }
+                            cnt += b.count_ones() as usize;
+                            sum += (b.count_ones() as usize * w * 64) as u64 + (0..6).map(|k| ((b & M[k]).count_ones() as u64) << k).sum::<u64>();
+                            while b != 0 && r.len() < 10 { r.push((w * 64) as u32 + b.trailing_zeros()); b &= b - 1; }
+                        }
+                    }
+                    // a phrase's terms are sorted out once, not per part: the rarest word anchors the
+                    // text check, the common ones are tested on their bitsets, the rest are ANDed
+                    // shortest first
+                    let (mut anchor, mut dn, mut ld) = (0, Vec::new(), Vec::new());
+                    if let Q::Phrase(ts, ks) = &qs[k] {
+                        anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
+                        let mut order: Vec<u32> = ts.to_vec();
+                        order.sort_unstable();
+                        order.dedup();
+                        (dn, ld) = order.into_iter().partition(|&t| (t as usize) < nd);
+                        ld.sort_by_key(|&t| tlen(t as usize));
+                    }
+                    for p in parts.iter().filter(|_| !big) {
+                        match &qs[k] {
+                            Q::Bool(v) => {
+                                x.clear();
+                                x.extend_from_slice(dl(p, v[0].1));
+                                for &(op, t) in &v[1..] {
+                                    match op { 1 => and(&x, dl(p, t), &mut y), 2 => or(&x, dl(p, t), &mut y), _ => not(&x, dl(p, t), &mut y) }
+                                    std::mem::swap(&mut x, &mut y);
+                                }
+                                add(&mut cnt, &mut sum, &mut r, &x, p.lo);
+                            }
+                            Q::Phrase(ts, ks) => {
+                                // docs holding every term, then the doc text decides
+                                let hit = &mut x;
+                                hit.clear();
+                                match ld.first() {
+                                    Some(&t0) => hit.extend_from_slice(dl(p, t0)),
+                                    None => hit.extend((0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16)),
+                                }
+                                for &t in ld.iter().skip(1) { if hit.is_empty() { break; } and(hit, dl(p, t), &mut y); std::mem::swap(hit, &mut y); }
+                                if !ld.is_empty() { hit.retain(|&x| { let d = p.lo + x as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }); }
+                                if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, anchor, &lower)); }
+                                add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
+                            }
+                        }
+                    }
+                    write!(o, "{} {}", cnt, sum).unwrap();
+                    for x in r.iter().take(10) { write!(o, " {x}").unwrap(); }
+                    o.push(b'\n');
+                }
+                res[b].set(o).ok();
             }});
         }
     });

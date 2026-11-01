@@ -208,3 +208,6 @@ callgrind on s7 counted about 118 instructions per token in the scan. Three cuts
 - A token that runs to the end of a 64 byte window is finished in the next window's masks, which the scan goes on with, instead of byte by byte through the lowercase table.
 s7: 492M -> 451M instructions (-8%). 15 alternating runs: 651 -> 635 ms median, CPU flat; peak 57-58 MB as before. Exact on s7, s42, t5, full, h99, h3.
 Reverted (round 38): board run-714d2f47ce0f 0.2877 s and run-ec28d4f60b9a 0.2919 s, against 0.2287 and 0.2445 s for round 36 just before. Fewer instructions locally, but clearly slower on the scoring box, so the scan goes back to round 36.
+
+## Round 39: answers in runs of 64 queries
+Each of the 50,000 answers was its own small Vec (and its own `Vec::with_capacity(10)` for the first ids), allocated on whichever thread answered it, then copied into the output one by one on the main thread. Queries are now handed out 64 at a time and a run's answers go into one buffer, with one first-ids vector per thread: 782 buffers instead of 100,000 small allocations across twelve malloc arenas, and 782 copies at the end. 15 alternating runs: 555 -> 550 ms; peak 57-59 MB as before. Exact on s7, s42, t5, full, h99, h3.
