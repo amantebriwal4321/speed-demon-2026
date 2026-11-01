@@ -172,3 +172,6 @@ Board: run-abf05797d461, 0.2433 s, 75.9 MB (from 86.7), 66.05 points, a new best
 
 ## Round 30: three waves
 At the fill peak, w waves keep about 24/w MB of lists alive on top of the 61 MB the scan ends with. 12 threads forced, three runs each: 2 waves 68-70 MB, 3 waves 66-67, 4 waves 65-67. Three, since each wave fills fewer parts at once. Exact on s7, s42, t5, full.
+
+## Round 31: common-term cutoff at 1 in 24
+With the fill spike gone, the peak is where the scan ends: the blocks plus the bitsets. A term near the old cutoff (1 doc in 48 of the sample, about 5,200 docs) costs 31 KB as a bitset but about 14 KB as postings plus a third of its list. 12 threads forced, three runs each: cutoff 48: 66 MB; 32: 61-63; 24: 61-62; 16: 62. Time, 11 alternating runs: 24 beats 48 (0.590 -> 0.557 s) and 32 (0.600 -> 0.568 s); 16 is slower in the queries (+14 ms). Exact on s7, s42, t5, full.

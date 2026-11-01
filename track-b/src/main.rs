@@ -163,7 +163,7 @@ fn main() {
     let use_bits = maxdoc < 1 << 26 && docs.len() > 0;
     // a 256 KB sample of the docs counts each term's docs. Term ids are renumbered by that
     // count, most common first, so the counters the scan touches most sit together. The
-    // first nd terms (over 1 doc in 32) never get a list: the scan marks them straight into
+    // first nd terms (over 1 doc in 24 of the sample) never get a list: the scan marks them straight into
     // a bitset, so their postings are never held.
     let mut c = vec![0u32; nall];
     let mut nd = 0usize;
@@ -187,8 +187,8 @@ fn main() {
                 if let Some(t) = t { if seen[t as usize] != nd0 { seen[t as usize] = nd0; c[t as usize] += 1; } }
             }
         }
-        // a margin under the 1 in 32 line, since the sample is small
-        nd = c.iter().filter(|&&x| x as u64 * 48 > nd0 as u64).count();
+        // at the fill peak a bitset (31 KB) costs less than a list from about here on
+        nd = c.iter().filter(|&&x| x as u64 * 24 > nd0 as u64).count();
     }
     let mut order: Vec<u32> = (0..nall as u32).collect();
     order.sort_by_key(|&t| std::cmp::Reverse(c[t as usize]));
@@ -300,10 +300,10 @@ fn main() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
     drop((short, longer));
-    // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
-    // which leaves out nearly half the postings
+    // the common terms are already in bitsets of all docs and get no list, which leaves out
+    // nearly half the postings
     // the fill runs in three waves: a part's blocks and its lists are both alive while it fills,
-    // so filling a third of the parts at a time keeps a third of the lists off the peak
+    // so filling a third of the parts at a time keeps two thirds of the lists off the peak
     let mut todo: Vec<_> = scan.into_iter().flatten().collect();
     let wave = todo.len().div_ceil(3);
     let mut parts: Vec<Part> = Vec::new();
