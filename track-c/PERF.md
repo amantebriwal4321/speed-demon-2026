@@ -68,3 +68,6 @@ The per country bitsets of names seen are the next cost: one atomic OR per recor
 ## Round 10: dynamic chunks (reverted)
 Eight pieces per thread pulled from an atomic counter instead of one fixed slice each: medians
 0.0538 s both ways, peak unchanged. The fixed split is already balanced, so it stays.
+
+## x86-64-v3 build
+Same target-cpu config as A and D. Exact on s7, s42, t5, full. Local medians about 1-3% faster.

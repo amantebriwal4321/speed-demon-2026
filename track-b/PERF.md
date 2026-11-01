@@ -73,3 +73,6 @@ SSE2 scan for the first word's first byte (case folded), then exact whole-token 
 the lowercase table. Words over 16 bytes keep the old tokenizing check. No pair table is built.
 Local (full, medians of 4 runs x2): 0.331 s -> 0.343 s (+3.5%), anon peak 147 MB -> 120 MB (-18%).
 By the T^0.5 M^0.2 score that is about +0.5 points net. Exact on s7, s42, t5, full.
+
+## x86-64-v3 build
+Same target-cpu config as A and D. Exact on s7, s42, t5, full. Local medians about 1-3% faster.
