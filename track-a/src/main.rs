@@ -279,14 +279,16 @@ fn main() {
         .collect();
     let mut order: Vec<u32> = (0..first.len() as u32).collect();
     order.sort_unstable_by_key(|&g| name(&eps[first[g as usize].0], first[g as usize].1));
-    let all: Vec<&[u8]> = order
+    // the names are copied out, so the threads' tables (about 170 KB each) go before the hours
+    let all: Vec<Vec<u8>> = order
         .iter()
-        .map(|&g| name(&eps[first[g as usize].0], first[g as usize].1))
+        .map(|&g| name(&eps[first[g as usize].0], first[g as usize].1).to_vec())
         .collect();
     let mut rank = vec![0u32; first.len()];
     for (r, &g) in order.iter().enumerate() {
         rank[g as usize] = r as u32;
     }
+    drop((eps, slot, first));
     for m in maps.iter_mut() {
         for g in m.iter_mut() {
             *g = rank[*g as usize];
@@ -389,7 +391,7 @@ fn main() {
                         line(
                             &mut o,
                             &hdr,
-                            all[g],
+                            &all[g],
                             [
                                 n as u64,
                                 pc(50),
