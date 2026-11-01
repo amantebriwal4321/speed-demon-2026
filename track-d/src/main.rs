@@ -129,6 +129,11 @@ fn main() {
                     v[(a as u64 * nt as u64 / n as u64) as usize].push((a as u64) << 32 | pk(b, w) as u64);
                     if w >= esc { let x = big.entry((a, b)).or_insert(w); *x = (*x).min(w); }
                 }
+                // drop this share's page table entries now, on this thread, rather than all of
+                // them at exit on one; the text is never read again. madvise, unlike munmap, does
+                // not lock out the other threads' page faults. The thread before may read a few
+                // bytes past its end, so a margin stays mapped at the front.
+                release(&c[256.min(c.len())..]);
                 (v, big)
             })
         }).collect();
@@ -361,6 +366,14 @@ fn main() {
 // start a cache miss early, into L2: the build walks nodes in an order it knows ahead
 #[inline(always)]
 fn pf<T>(x: &[T], i: usize) { if i < x.len() { unsafe { std::arch::x86_64::_mm_prefetch(x.as_ptr().add(i) as *const i8, std::arch::x86_64::_MM_HINT_T1) } } }
+
+// MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
+// this process's mapping of them goes
+fn release(b: &[u8]) {
+    extern "C" { fn madvise(a: *const u8, l: usize, advice: i32) -> i32; }
+    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
+    if a < e { unsafe { madvise(a as *const u8, e - a, 4) }; }
+}
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
 fn map(path: &str) -> &'static [u8] {
