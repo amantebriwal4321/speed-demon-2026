@@ -63,25 +63,46 @@ fn pack(b: &[u8], l: usize) -> u128 {
     (u128::from_le_bytes(x) | 0x2020_2020_2020_2020_2020_2020_2020_2020) & m
 }
 
-// bit i set when b[at + i] is a token byte (a-z, A-Z, 0-9), and when it is LF; SSE2 only
+// bit i set when b[at + i] is a token byte (a-z, A-Z, 0-9), and when it is LF
+#[inline(always)]
 fn masks(b: &[u8], at: usize) -> (u64, u64) {
+    if at + 64 > b.len() { return masks_tail(b, at); }
     use std::arch::x86_64::*;
-    let mut pad = [0u8; 64];
-    let src = if at + 64 <= b.len() { &b[at..at + 64] } else { let n = b.len() - at; pad[..n].copy_from_slice(&b[at..]); &pad[..] };
     let (mut t, mut n) = (0u64, 0u64);
     unsafe {
-        for q in 0..4 {
-            let x = _mm_loadu_si128(src.as_ptr().add(16 * q) as *const __m128i);
-            let flip = _mm_set1_epi8(-128);
-            // unsigned v < k  <=>  (v ^ 0x80) < (k ^ 0x80) as signed bytes
-            let letter = _mm_cmplt_epi8(_mm_xor_si128(_mm_sub_epi8(_mm_or_si128(x, _mm_set1_epi8(0x20)), _mm_set1_epi8(b'a' as i8)), flip), _mm_set1_epi8((26u8 ^ 0x80) as i8));
-            let digit = _mm_cmplt_epi8(_mm_xor_si128(_mm_sub_epi8(x, _mm_set1_epi8(b'0' as i8)), flip), _mm_set1_epi8((10u8 ^ 0x80) as i8));
-            let lf = _mm_cmpeq_epi8(x, _mm_set1_epi8(b'\n' as i8));
-            t |= (_mm_movemask_epi8(_mm_or_si128(letter, digit)) as u16 as u64) << (16 * q);
-            n |= (_mm_movemask_epi8(lf) as u16 as u64) << (16 * q);
+        for q in 0..2 {
+            let x = _mm256_loadu_si256(b.as_ptr().add(at + 32 * q) as *const __m256i);
+            // a letter (folded by bit 5) or a digit is at most 25 or 9 above 'a' or '0'
+            let l = _mm256_sub_epi8(_mm256_or_si256(x, _mm256_set1_epi8(0x20)), _mm256_set1_epi8(b'a' as i8));
+            let d = _mm256_sub_epi8(x, _mm256_set1_epi8(b'0' as i8));
+            let letter = _mm256_cmpeq_epi8(_mm256_min_epu8(l, _mm256_set1_epi8(25)), l);
+            let digit = _mm256_cmpeq_epi8(_mm256_min_epu8(d, _mm256_set1_epi8(9)), d);
+            let lf = _mm256_cmpeq_epi8(x, _mm256_set1_epi8(b'\n' as i8));
+            t |= (_mm256_movemask_epi8(_mm256_or_si256(letter, digit)) as u32 as u64) << (32 * q);
+            n |= (_mm256_movemask_epi8(lf) as u32 as u64) << (32 * q);
         }
     }
     (t, n)
+}
+// the same for the last bytes of the file, through a zero padded copy
+#[cold]
+fn masks_tail(b: &[u8], at: usize) -> (u64, u64) {
+    let mut pad = [0u8; 64];
+    pad[..b.len() - at].copy_from_slice(&b[at..]);
+    masks(&pad, 0)
+}
+
+// pack() for the token of l <= 16 bytes at b[at..], with the bytes past the token cleared by a
+// sliding mask instead of a 128-bit shift
+#[inline(always)]
+fn key(b: &[u8], at: usize, l: usize) -> u128 {
+    use std::arch::x86_64::*;
+    static KEEP: [u8; 32] = [255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if at + 16 > b.len() { return pack(&b[at..], l); }
+    unsafe {
+        let x = _mm_or_si128(_mm_loadu_si128(b.as_ptr().add(at) as *const __m128i), _mm_set1_epi8(0x20));
+        std::mem::transmute(_mm_and_si128(x, _mm_loadu_si128(KEEP.as_ptr().add(16 - l) as *const __m128i)))
+    }
 }
 
 fn hm(k: u128) -> u64 { (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F) }
@@ -290,17 +311,18 @@ fn main() {
                         i += z; o += z;
                         if nm >> o & 1 == 1 { if pend.0 != 0 { handle!(lookup(pend)); } break; }
                         let s = i;
-                        let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
+                        let mut run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
                         i += run; o += run;
-                        if o >= 64 { while lower[c[i] as usize] != 0 { i += 1; } o = 64; }
+                        // a token that reaches the end of the window goes on in the next one
+                        while o >= 64 { (tm, nm) = masks(docs, base + i); run = (!tm).trailing_zeros() as usize; i += run; o = run; }
                         let l = i - s;
                         // a short token's slot is prefetched and looked up one token later, so the
                         // table miss overlaps the scan of the next token
                         let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
-                            let k = pack(&docs[base + s..], l);
+                            let k = key(docs, base + s, l);
                             (1, k, short.at(k), None)
                         } else if l <= 16 {
-                            let k = pack(&docs[base + s..], l);
+                            let k = key(docs, base + s, l);
                             (3, k, longer.at(k), None)
                         } else if l <= 32 {
                             let mut t = [0u8; 32];

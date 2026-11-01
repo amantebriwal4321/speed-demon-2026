@@ -200,3 +200,10 @@ Reverted: board run-6397ea3d3c86 gave 0.2593 s at 78.6 MB, 8 MB above round 34 (
 ## Round 36: query terms numbered in a second pass, with prefetch
 The query parse is serial time before the scan can start: about 35 ms locally, and most of it was the term table. Each word looked itself up in a 5 MB table the moment it was read, a cache miss after a cache miss, and the table also grew by rehashing. Now the lines are cut into words first (one pass over the bytes, the operator told apart by its first letter), and the table then numbers all words in a second pass, sized once for every word, with each word's slot prefetched 16 words ahead so the misses overlap. Ids come out in the same first-seen order. `words` is sized up front so it gets its own mapping and leaves nothing in the heap; with THP `always` the 4-thread peak is unchanged (57-59 MB both).
 Query parse 37.8 -> 17.5 ms (15 alternating runs). Phase medians over 11 alternating runs: queries 33 -> 17 ms, end to end 617 -> 561 ms. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 37: fewer instructions per token in the scan
+callgrind on s7 counted about 118 instructions per token in the scan. Three cuts, the scan otherwise unchanged:
+- masks() builds the token and LF bitmasks of 64 bytes from two 32 byte AVX2 compares (a byte is a letter or digit when it is at most 25 or 9 above 'a' or '0', tested with an unsigned min) instead of four 16 byte SSE2 ones, and only the last 64 bytes of the file go through a zero padded copy; it used to zero a 64 byte pad on every call.
+- key() packs a token of up to 16 bytes from one 16 byte load, lowercased with bit 5 and cut to its length by a sliding byte mask, instead of a copy and a 128-bit shift.
+- A token that runs to the end of a 64 byte window is finished in the next window's masks, which the scan goes on with, instead of byte by byte through the lowercase table.
+s7: 492M -> 451M instructions (-8%). 15 alternating runs: 651 -> 635 ms median, CPU flat; peak 57-58 MB as before. Exact on s7, s42, t5, full, h99, h3.
