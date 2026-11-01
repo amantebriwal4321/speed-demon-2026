@@ -5,22 +5,29 @@ const HOURS: usize = 72; // 2026-10-30T18 .. 2026-11-02T17
 #[inline(always)]
 fn ld8(b: &[u8], i: usize) -> u64 { unsafe { (b.as_ptr().add(i) as *const u64).read_unaligned() } }
 
-// one thread's endpoints: open addressing on (first 8 bytes, last 8 bytes, length), checked
-// against the bytes of the first occurrence, which stay in the mmap
-// one hour's rows in fixed blocks, so nothing is ever copied by a growing Vec. A row is
-// local id << 21 | is_5xx << 20 | latency; latencies from 2^20 - 1 up (about 1%) and ids past
-// 2046 go to `side` as full u64 rows instead
+// A row is local id << 21 | is_5xx << 20 | latency; latencies from 2^20 - 1 up (about 1%) and
+// ids past 2046 go to a thread's `side` rows as full u64 rows instead.
 const LAT_ESC: u32 = (1 << 20) - 1;
-const BLK: usize = 16384; // 64 KB, so far fewer mmap and munmap calls; untouched pages of a last block cost nothing
-struct Hr { blocks: Vec<Vec<u32>>, side: Vec<u64> }
-impl Hr {
-    #[inline(always)]
-    fn push(&mut self, x: u32) {
-        match self.blocks.last_mut() {
-            Some(b) if b.len() < BLK => b.push(x),
-            _ => { let mut b = Vec::with_capacity(BLK); b.push(x); self.blocks.push(b); }
-        }
+
+// Every row lives in one mapping reserved up front: for each hour a region per thread, the
+// hour's regions side by side. A region holds as many rows as its thread's share of the file
+// can have lines, so a thread appends to its own regions with no growth or bounds check, and
+// untouched pages cost nothing. Once an hour's rows are gathered, one madvise hands all its
+// pages back, instead of an unmap per block, each of which interrupted every core.
+struct Rows { base: *mut u32, cap: usize, nt: usize }
+unsafe impl Sync for Rows {}
+extern "C" { fn madvise(a: *mut u8, l: usize, advice: i32) -> i32; }
+impl Rows {
+    fn new(nt: usize, rows: usize) -> Rows {
+        extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+        let cap = rows.next_multiple_of(1024); // whole 4 KB pages, so freeing one hour never touches the next
+        let len = HOURS * nt * cap * 4;
+        let base = unsafe { mmap(std::ptr::null_mut(), len, 3, 0x4022, -1, 0) }; // read/write, private anonymous, no reserve
+        unsafe { madvise(base, len, 15) }; // MADV_NOHUGEPAGE: a 2 MB page would span regions
+        Rows { base: base as *mut u32, cap, nt }
     }
+    fn region(&self, h: usize, k: usize) -> *mut u32 { unsafe { self.base.add((h * self.nt + k) * self.cap) } }
+    fn free(&self, h: usize) { unsafe { madvise(self.region(h, 0) as *mut u8, self.nt * self.cap * 4, 4) }; } // MADV_DONTNEED
 }
 
 // a thread's endpoints: hash slots, and per id its text's place in `text` (a copy, so a long
@@ -31,7 +38,7 @@ const TB: usize = 1 << 13;
 fn main() {
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
-    // blocks of 16 KB and up get their own mmap, so a freed hour really leaves the process
+    // buffers of 16 KB and up get their own mmap, so a written hour's text really leaves the process
     extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
     unsafe { mallopt(-3, 16 * 1024 - 64) }; // M_MMAP_THRESHOLD
     let b = map(&format!("{data}/requests.log"));
@@ -47,14 +54,17 @@ fn main() {
         cuts.push(p);
     }
     cuts.push(b.len());
+    // a line is at least 40 bytes
+    let rows = Rows::new(nt, cuts.windows(2).map(|w| w[1] - w[0]).max().unwrap() / 40 + 1);
+    let rows = &rows;
 
-    // per thread: endpoint table, and per hour rows of local id << 33 | latency << 1 | is_5xx
-    let parts: Vec<(Eps, Vec<Hr>)> = std::thread::scope(|sc| {
+    // per thread: endpoint table, its row count in each hour, and its side rows per hour
+    let parts: Vec<(Eps, [usize; HOURS], Vec<Vec<u64>>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
                 let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), text: vec![0; 64] };
-                let mut rows: Vec<Hr> = (0..HOURS).map(|_| Hr { blocks: Vec::new(), side: Vec::new() }).collect();
+                let (mut n, mut side) = ([0usize; HOURS], vec![Vec::new(); HOURS]);
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
                 let mut start = lo;
@@ -119,12 +129,14 @@ fn main() {
                             if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || eq(&e.text, e.start[x as usize] as usize, c, es, l)) { break x; }
                             s = (s + 1) & (TB - 1);
                         };
-                        let r = unsafe { rows.get_unchecked_mut(hour) };
-                        if v < LAT_ESC as u64 && id < 2047 { r.push(id << 21 | (five as u32) << 20 | v as u32); } else { r.side.push((id as u64) << 33 | v << 1 | five as u64); }
+                        if v < LAT_ESC as u64 && id < 2047 {
+                            unsafe { *rows.region(hour, k).add(n[hour]) = id << 21 | (five as u32) << 20 | v as u32 };
+                            n[hour] += 1;
+                        } else { side[hour].push((id as u64) << 33 | v << 1 | five as u64); }
                     }
                     blk += 64;
                 }
-                (e, rows)
+                (e, n, side)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -135,7 +147,7 @@ fn main() {
     // (first and last 8 bytes, length) and compared on the text; the distinct names are then
     // sorted once and each thread's ids mapped to their rank
     fn name(e: &Eps, x: usize) -> &[u8] { &e.text[e.start[x] as usize..(e.start[x] + e.len[x]) as usize] }
-    let (eps, parts): (Vec<Eps>, Vec<Vec<Hr>>) = parts.into_iter().unzip();
+    let (eps, counts, sides): (Vec<Eps>, Vec<[usize; HOURS]>, Vec<Vec<Vec<u64>>>) = parts.into_iter().fold((Vec::new(), Vec::new(), Vec::new()), |mut a, (e, n, s)| { a.0.push(e); a.1.push(n); a.2.push(s); a });
     let cap = (2 * eps.iter().map(|e| e.len.len()).sum::<usize>()).next_power_of_two().max(16);
     let mut slot = vec![u32::MAX; cap];
     let mut first: Vec<(usize, usize)> = Vec::new(); // (thread, its id) of each distinct name
@@ -157,9 +169,8 @@ fn main() {
     for (r, &g) in order.iter().enumerate() { rank[g as usize] = r as u32; }
     for m in maps.iter_mut() { for g in m.iter_mut() { *g = rank[*g as usize]; } }
     let ne = all.len();
-    let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(std::sync::Mutex::new).collect();
-    let _ = &parts;
-    let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });
+    // thread pi's rows of hour h, and its side rows
+    let rows_of = |pi: usize, h: usize| (unsafe { std::slice::from_raw_parts(rows.region(h, pi), counts[pi][h]) }, &sides[pi][h]);
 
     let next = std::sync::atomic::AtomicUsize::new(0);
     // hours get written in order as soon as they and every hour before them are done, so
@@ -178,27 +189,28 @@ fn main() {
                     if h >= HOURS { break; }
                     let date = ["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"][(h + 18) / 24];
                     let hh = (h + 18) % 24;
-                    let rs: Vec<Hr> = (0..maps.len()).map(|pi| rows_of(pi, h)).collect();
+                    let rs: Vec<_> = (0..maps.len()).map(|pi| rows_of(pi, h)).collect();
                     // counting sort by global endpoint id, keeping latency << 1 | is_5xx
                     cnt.fill(0);
-                    for (pi, r) in rs.iter().enumerate() {
+                    for (pi, (r, side)) in rs.iter().enumerate() {
                         let m = &maps[pi];
-                        for b in &r.blocks { for &x in b { cnt[m[(x >> 21) as usize] as usize + 1] += 1; } }
-                        for &x in &r.side { cnt[m[(x >> 33) as usize] as usize + 1] += 1; }
+                        for &x in r.iter() { cnt[m[(x >> 21) as usize] as usize + 1] += 1; }
+                        for &x in side.iter() { cnt[m[(x >> 33) as usize] as usize + 1] += 1; }
                     }
                     for g in 0..ne { cnt[g + 1] += cnt[g]; }
                     let total = cnt[ne] as usize;
                     buf.clear(); buf.resize(total, 0);
                     let mut cur = cnt.clone();
-                    for (pi, r) in rs.iter().enumerate() {
+                    for (pi, (r, side)) in rs.iter().enumerate() {
                         let m = &maps[pi];
-                        for b in &r.blocks { for &x in b {
+                        for &x in r.iter() {
                             let g = m[(x >> 21) as usize] as usize;
                             buf[cur[g] as usize] = x & LAT_ESC; errv[g] += (x >> 20 & 1) as u64; cur[g] += 1;
-                        } }
-                        for &x in &r.side { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = (x >> 1) as u32; errv[g] += x & 1; cur[g] += 1; }
+                        }
+                        for &x in side.iter() { let g = m[(x >> 33) as usize] as usize; buf[cur[g] as usize] = (x >> 1) as u32; errv[g] += x & 1; cur[g] += 1; }
                     }
-                    drop(rs); // the blocks are their own mappings, so this hands the pages back while the output grows in the page cache
+                    drop(rs);
+                    rows.free(h); // the hour's pages go back while the output grows in the page cache
                     let mut o = Vec::with_capacity(ne * 48);
                     let hdr: [u8; 21] = format!("{date}T{hh:02}:00:00Z ").into_bytes().try_into().unwrap();
                     for g in 0..ne {
