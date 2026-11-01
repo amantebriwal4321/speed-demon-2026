@@ -68,3 +68,7 @@ A hash based distance map per thread to cut memory, and a faster integer parser.
 A relaxed node is only pushed when nd + (other side's heap min) < best: any rest of the path
 from v costs at least that frontier, and if the other side already reached v, best was updated
 just before. Exact on s7, s42, t5, full. Local medians 0.2222 s -> 0.2183 s (-1.8%).
+
+## Round 10: drop the unused touched lists
+The per-query touched lists were filled but never read (clear() refills the whole table).
+Removed: exact on s7, s42, t5, full; medians 0.2075 s vs 0.2068 s, a few lines less code.

@@ -267,7 +267,6 @@ fn main() {
             sc.spawn(|| {
                 // bidirectional Dijkstra: side 0 runs forward from s, side 1 backward from t
                 let mut dist = [Dist::new(n), Dist::new(n)];
-                let mut touched: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
                 let mut heap = [Radix::new(), Radix::new()];
                 let g = [(&off, &adj), (&roff, &radj)];
                 loop {
@@ -277,7 +276,7 @@ fn main() {
                     let mut best = u64::MAX;
                     if s == t { best = 0; } else {
                         for (side, x) in [(0, s), (1, t)] {
-                            dist[side].set(x, 0); touched[side].push(x); heap[side].push(0, x);
+                            dist[side].set(x, 0); heap[side].push(0, x);
                         }
                         loop {
                             let tf = heap[0].min();
@@ -297,7 +296,6 @@ fn main() {
                                 let k = mine.t[i];
                                 let dv = if k == E { u64::MAX } else if k as u32 == SPILL { mine.big[&v] } else { k as u32 as u64 };
                                 if nd < dv {
-                                    if dv == u64::MAX { touched[side].push(v); }
                                     mine.set_at(i, v, nd);
                                     let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }
@@ -308,7 +306,7 @@ fn main() {
                         }
                         for side in 0..2 {
                             dist[side].clear();
-                            touched[side].clear(); heap[side].clear();
+                            heap[side].clear();
                         }
                     }
                     let res = best;
