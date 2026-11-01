@@ -184,7 +184,7 @@ fn main() {
                     }
                     drop(rs); // the blocks are their own mappings, so this hands the pages back while the output grows in the page cache
                     let mut o = Vec::with_capacity(ne * 48);
-                    let hdr = format!("{date}T{hh:02}:00:00Z ").into_bytes();
+                    let hdr: [u8; 21] = format!("{date}T{hh:02}:00:00Z ").into_bytes().try_into().unwrap();
                     for g in 0..ne {
                         let (s, t) = (cnt[g] as usize, cnt[g + 1] as usize);
                         if s == t { continue; }
@@ -198,10 +198,7 @@ fn main() {
                         if k(95) < k(99) { grp[..k(99)].select_nth_unstable(k(95)); }
                         if k(50) < k(95) { grp[..k(95)].select_nth_unstable(k(50)); }
                         let pc = |p: usize| grp[k(p)] as u64;
-                        o.extend_from_slice(&hdr);
-                        o.extend_from_slice(all[g]);
-                        for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
-                        o.push(b'\n');
+                        line(&mut o, &hdr, all[g], [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64]);
                     }
                     // one thread at a time writes, outside the lock, so the others only drop their hour off
                     let mut w = wr.lock().unwrap();
@@ -223,15 +220,29 @@ fn main() {
     std::process::exit(0);
 }
 
-// decimal digits of x, two at a time
-#[inline]
-fn num(o: &mut Vec<u8>, mut x: u64) {
+// one output line, written straight into o's spare room after one reserve: the hour, the
+// endpoint, then six numbers, each a space and its decimal digits
+fn line(o: &mut Vec<u8>, hdr: &[u8; 21], ep: &[u8], nums: [u64; 6]) {
     const D: &[u8; 200] = b"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
-    let mut t = [0u8; 20];
-    let mut i = 20;
-    while x >= 100 { let r = (x % 100) as usize; x /= 100; i -= 2; t[i..i + 2].copy_from_slice(&D[2 * r..2 * r + 2]); }
-    if x >= 10 { i -= 2; t[i..i + 2].copy_from_slice(&D[2 * x as usize..2 * x as usize + 2]); } else { i -= 1; t[i] = b'0' + x as u8; }
-    o.extend_from_slice(&t[i..]);
+    o.reserve(hdr.len() + ep.len() + 6 * 21 + 1);
+    unsafe {
+        let mut p = o.as_mut_ptr().add(o.len());
+        std::ptr::copy_nonoverlapping(hdr.as_ptr(), p, hdr.len());
+        p = p.add(hdr.len());
+        std::ptr::copy_nonoverlapping(ep.as_ptr(), p, ep.len());
+        p = p.add(ep.len());
+        for mut x in nums {
+            *p = b' ';
+            // the digits go in from the last one back, two at a time
+            let n = x.checked_ilog10().unwrap_or(0) as usize + 1;
+            let mut q = p.add(n + 1);
+            while x >= 100 { q = q.sub(2); std::ptr::copy_nonoverlapping(D.as_ptr().add(2 * (x % 100) as usize), q, 2); x /= 100; }
+            if x >= 10 { std::ptr::copy_nonoverlapping(D.as_ptr().add(2 * x as usize), q.sub(2), 2); } else { *q.sub(1) = b'0' + x as u8; }
+            p = p.add(n + 1);
+        }
+        *p = b'\n';
+        o.set_len(p.add(1).offset_from(o.as_ptr()) as usize);
+    }
 }
 
 // are x[i..i + l] and y[j..j + l] equal (l > 0)? Two 32 byte compares when 64 bytes can be read from
