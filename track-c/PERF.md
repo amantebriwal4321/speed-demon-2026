@@ -116,3 +116,6 @@ A second try at round 5's idea, now with the AVX2 build: quote, comma and LF mas
 
 ## Round 20: each thread unmaps its own part (board experiment)
 Timing an empty program that maps the 239 MB track A log and touches every page: the mapping costs about 3 ms to tear down at exit, on one thread, after all the work is done. The C parse never looks at a record again once its thread has passed it, so each thread now unmaps the whole pages of its own part as soon as it is done (keeping 256 bytes at the front, which the thread before may read past its end). The teardown is then spread over the threads instead of serialised at exit. Exact on s7, s42, t5, full, h99, h3. 21 and 31 alternating runs at 4 threads: 0.157 -> 0.143 s (-9%) and 0.155 -> 0.149 s (-4%).
+
+## Round 21: the seen word prefetched for writing
+Nine records in ten set a new bit in their country's seen bitset, so the word they prefetch is about to be written. A plain prefetch brings the line in shared; the atomic OR then has to ask for it again, owned, from whichever core set a bit in it last. PREFETCHW (inline asm, since the target feature behind `_MM_HINT_ET0` is not stable) asks for it owned in one go. The name table stays a plain prefetch, as it is nearly read-only. 21 alternating runs, twice: 0.165 -> 0.151 s (-8%), CPU 535-560 -> 496-505 ms. Exact on s7, s42, t5, full, h99, h3.

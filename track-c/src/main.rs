@@ -155,7 +155,7 @@ fn main() {
                     unsafe {
                         use std::arch::x86_64::*;
                         _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
-                        _mm_prefetch(seen.as_ptr().add(g * words + j0 / 64) as *const i8, _MM_HINT_T0);
+                        prefetchw(seen.as_ptr().add(g * words + j0 / 64));
                     }
                     if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
                     pg = g; pme = me; pj = j0;
@@ -203,6 +203,13 @@ fn map(path: &str) -> &'static [u8] {
     let len = f.metadata().unwrap().len() as usize;
     if len == 0 { return &[]; }
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0), len) }
+}
+
+// PREFETCHW: the line comes in owned, ready for the OR that follows, instead of shared first and
+// then asked for again from whichever core last set a bit in it
+#[inline(always)]
+fn prefetchw<T>(p: *const T) {
+    unsafe { std::arch::asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags, readonly)) }
 }
 
 // munmap the whole pages inside `b`
