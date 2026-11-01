@@ -203,12 +203,18 @@ fn main() {
     // a common term's table value becomes its bitset slot with the top bit set, so the scan
     // marks it without touching last[] or a side table
     for j in 0..cap { if keys[j] != 0 && bslot[vals[j] as usize] != u32::MAX { vals[j] = 1 << 31 | bslot[vals[j] as usize]; } }
+    // the scan probes `slots`: 32 bits of hash over the value, 8 bytes a slot instead of 16, so
+    // a token no query uses usually costs one access to a table half the size; keys[j] is only
+    // read when the hash bits match
+    let fp = |k: u128| hm(k) as u32 | 1;
+    let slots: Vec<u64> = (0..cap).map(|j| if keys[j] == 0 { 0 } else { (fp(keys[j]) as u64) << 32 | vals[j] as u64 }).collect();
+    drop(vals);
     for v in long.values_mut() { if bslot[*v as usize] != u32::MAX { *v = 1 << 31 | bslot[*v as usize]; } }
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, abits) = (&keys, &vals, &long, &lower, &abits);
+            let (keys, slots, long, lower, abits) = (&keys, &slots, &long, &lower, &abits);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
@@ -245,7 +251,8 @@ fn main() {
                     let lookup = |p: (u8, u128, usize, Option<u32>)| -> Option<u32> {
                         if p.0 == 2 { return p.3; }
                         let (k, mut j) = (p.1, p.2);
-                        loop { let x = keys[j]; if x == k { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); }
+                        let f = fp(k) as u64;
+                        loop { let x = slots[j]; if x == 0 { break None; } if x >> 32 == f && keys[j] == k { break Some(x as u32); } j = (j + 1) & (cap - 1); }
                     };
                     let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
                     // token and LF bitmasks of a 64 byte window, then walk the bits
@@ -268,7 +275,7 @@ fn main() {
                         let nx: (u8, u128, usize, Option<u32>) = if l <= 16 {
                             let k = pack(&docs[base + s..], l);
                             let j = (hm(k) >> (shift - 64)) as usize;
-                            unsafe { std::arch::x86_64::_mm_prefetch(keys.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
+                            unsafe { std::arch::x86_64::_mm_prefetch(slots.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
                             (1, k, j, None)
                         } else if l <= 32 {
                             let mut t = [0u8; 32];

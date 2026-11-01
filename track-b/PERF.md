@@ -113,3 +113,6 @@ Replacing the SSE2 first-byte scan in has2 with a byte loop cuts 6 lines but is 
 
 ## Round 17: query terms straight into the scan table
 Reading the 50,000 queries took 20-36 ms: a HashMap of 86k distinct words hit with 300k lookups, then rebuilt into the u128 table. Terms now go straight into the open-addressing u128 table (grown at half full, same final size), long ones into a small map, so there is no second build. Exact on s7, s42, t5, full; paired medians 0.329/0.326/0.306 -> 0.305/0.296/0.285 s, peak 82 -> 79 MB.
+
+## Round 18: 8-byte probe slots
+The scan probes slots of 32 hash bits over the value (8 bytes, table half the size of the u128 keys); keys[j] is read only when the hash bits match. vals is freed once the slots exist. Exact on s7, s42, t5, full; peak 79 -> 80 MB; faster in 5 of 6 later paired runs, e.g. 0.292/0.294/0.285 -> 0.275/0.280/0.273 s.
