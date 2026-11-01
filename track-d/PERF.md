@@ -87,3 +87,6 @@ Packed 12-byte radix entries: peak 90 -> 89 MB, time same; the heaps are not the
 
 ## Round 15: stale heap entries
 451,741 of 7,594,508 pops (6%) are stale, so skipping them cannot buy much; not attempted.
+
+## Round 16: query design
+Pops per query: median 128, p90 12,150, max 79,548; the longest 10% of queries do 75% of the work. Tried: dense per-thread distance arrays (peak 89 -> 179 MB, no faster), a per-node bit filter before asking the other side (no faster), multiply instead of divide for edge buckets (within noise). A landmark (ALT) lower bound needs a full-graph Dijkstra per landmark and direction, about 180 ms of thread time each at our measured ~105 ns per pop, against ~75 ms of query time it could save; a geometric bound is not valid because of the weight-0 edges. Nothing kept.

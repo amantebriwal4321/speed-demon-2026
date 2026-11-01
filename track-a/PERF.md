@@ -68,3 +68,6 @@ The thread that flushed finished hours used to hold the lock through write_all, 
 
 ## Round 16: parser profile and tries (not kept)
 Ablations on full: LF walk only 6.5 ms, + field parse ~10 ms, + endpoint lookup ~15 ms (the lookup is the largest parse cost; row pushes are free). Keys inline in the slot table (24 B slots): +1-3%. One-multiply hash: same. Both reverted.
+
+## Round 17: batched endpoint lookups (not kept)
+Lines parsed into batches of 16 or 64, lookups run per batch so they can overlap: exact on all sets, but four paired runs each were within noise (0.0466/0.0454/0.0460/0.0465 vs 0.0496/0.0459/0.0453/0.0467 s at 16). The out-of-order core already overlaps them. Reverted.
