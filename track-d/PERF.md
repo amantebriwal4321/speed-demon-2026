@@ -90,3 +90,14 @@ Packed 12-byte radix entries: peak 90 -> 89 MB, time same; the heaps are not the
 
 ## Round 16: query design
 Pops per query: median 128, p90 12,150, max 79,548; the longest 10% of queries do 75% of the work. Tried: dense per-thread distance arrays (peak 89 -> 179 MB, no faster), a per-node bit filter before asking the other side (no faster), multiply instead of divide for edge buckets (within noise). A landmark (ALT) lower bound needs a full-graph Dijkstra per landmark and direction, about 180 ms of thread time each at our measured ~105 ns per pop, against ~75 ms of query time it could save; a geometric bound is not valid because of the weight-0 edges. Nothing kept.
+
+## Round 17: query-phase memory with 12 threads
+With the thread count forced to 12 (the board's), the local cgroup peak is 98 MB against 78 MB with 4 threads, close to the board's 104 MB. Anonymous memory per phase showed the queries adding 26 MB: each thread's distance tables (up to 1 MB + 512 KB), `used` lists (384 KB) and heap buckets (0.5 MB), plus every table a search outgrew, which glibc keeps in the thread's arena where the next, larger table can't reuse it.
+- Before the queries the mmap threshold is fixed at 128 KB (so an outgrown table goes back to the kernel) and malloc_trim(0) hands back what the build freed. Fixing the threshold from the start instead gave 80 MB but cost 5% in the build phases (fresh pages for every big buffer).
+- The `used` list stops growing at 1/16 of the table, the point where clearing falls back to a fill anyway.
+12-thread peak 98 -> 84 MB; time neutral (per-phase medians over 11-13 alternating runs within +0.4%). Exact on s7, s42, t5, full. rustfmt lines 541 -> 554.
+Tried and dropped, all exact:
+- Dist slot from the BFS-ordered id itself (`v & mask`) for locality: +15%, linear-probe clustering. Hashing groups of 8 ids so a group shares a line: no change.
+- Expanding the side with the smaller top key instead of the smaller heap: 3.4x slower (the graph is far from symmetric).
+- Shrinking each table back to 16K slots after a big search (with the fixed threshold): 71 MB peak but queries +12%.
+Profile of the query loop (perf, 4 cores): about 30% of its samples are misses on `off`/`adj`, 32% on the two distance-table probes, and Radix::fill is 11% of the whole run.

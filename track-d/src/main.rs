@@ -58,7 +58,7 @@ impl Dist {
         if self.t[i] == E {
             if (self.len + 1) * 2 > self.t.len() { self.grow(); i = self.slot(v); }
             self.len += 1;
-            self.used.push(i as u32);
+            self.track(i);
         }
         let x = if d < SPILL as u64 { d as u32 } else { self.big.insert(v, d); SPILL };
         self.t[i] = (v as u64) << 32 | x as u64;
@@ -67,11 +67,13 @@ impl Dist {
         let c = self.t.len() * 2;
         let old = std::mem::replace(&mut self.t, vec![E; c]);
         self.used.clear();
-        for k in old { if k != E { let i = self.slot((k >> 32) as u32); self.t[i] = k; self.used.push(i as u32); } }
+        for k in old { if k != E { let i = self.slot((k >> 32) as u32); self.t[i] = k; self.track(i); } }
     }
+    // the filled slots, kept only while few enough that clearing them one by one beats a fill
+    fn track(&mut self, i: usize) { if self.used.len() * 16 < self.t.len() { self.used.push(i as u32); } }
     // most searches touch a few thousand slots of a table grown by an earlier big one
     fn clear(&mut self) {
-        if self.used.len() * 16 < self.t.len() { for &i in &self.used { self.t[i as usize] = E; } } else { self.t.fill(E); }
+        if (self.used.len() + 1) * 16 < self.t.len() { for &i in &self.used { self.t[i as usize] = E; } } else { self.t.fill(E); }
         self.used.clear(); self.len = 0; self.big.clear();
     }
 }
@@ -268,15 +270,17 @@ fn main() {
             });
         }
     });
-
     drop(rcur);
+    // from here on a table of 128 KB or more gets its own mapping, so the old table a search
+    // outgrows goes back to the kernel instead of sitting unused in a thread's malloc arena
+    extern "C" { fn mallopt(p: i32, v: i32) -> i32; fn malloc_trim(pad: usize) -> i32; }
+    unsafe { mallopt(-3, 1 << 17); malloc_trim(0) }; // M_MMAP_THRESHOLD; free arena memory back too
     let q = map(&format!("{data}/queries.txt"));
     let mut qs = Vec::new();
     let mut j = 0;
     while j < q.len() { let s = num(q, &mut j); let t = num(q, &mut j); qs.push((newid[s as usize], newid[t as usize])); }
     let big: HashMap<(u32, u32), u32> = big.into_iter().map(|((a, b), w)| ((newid[a as usize], newid[b as usize]), w)).collect();
     drop(newid);
-
     let ans: Vec<AtomicU64> = (0..qs.len()).map(|_| AtomicU64::new(0)).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
