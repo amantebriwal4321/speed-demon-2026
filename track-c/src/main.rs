@@ -67,8 +67,7 @@ fn main() {
     let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
     let (mut ids, mut country): (Vec<(u64, u32)>, Vec<u16>) = (Vec::new(), Vec::new()); // code here, rank below
     while i < r.len() {
-        let mut id = 0usize;
-        while r[i] != b',' { id = id * 10 + (r[i] - b'0') as usize; i += 1; }
+        let id = dig(r, &mut i) as usize;
         let c = &r[i + 1..i + 4];
         if ids.len() <= id / 64 { ids.resize(id / 64 + 1, (0, 0)); }
         ids[id / 64].0 |= 1 << (id % 64);
@@ -122,7 +121,7 @@ fn main() {
                 let mut i = lo;
                 let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
                 while i < hi {
-                    if c[i..].starts_with(BOM) { i += 3; }
+                    if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] { i += 3; }
                     let id = dig(c, &mut i) as i64;
                     i += 1;
                     let (ns, ne, nl) = field(c, &mut i);

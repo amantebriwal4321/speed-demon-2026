@@ -98,3 +98,7 @@ The region table was 2 MB indexed by region id (ids up to 999,999, 200,000 prese
 
 ## Round 16: read the seen bit before setting it
 Every record did an atomic OR on its (country, name) bit. With 12 threads the lines of the popular countries move between cores on every OR, even when the bit is already set, which it is for every repeat of a pair. The bit is now read first and only ORed when clear, so a repeat leaves the line shared. Locally (4 cores, no SMT) this is neutral, 21 alternating runs at 4 and at 12 threads within 1-4%; it is aimed at the board's 6 cores. Exact on s7, s42, t5, full.
+Rounds 15 + 16 on the board: run-9e2e34661d58, 0.0539 s, 9.3 MB, 72.78 points, a new best, rank 33 -> 24 of 94.
+
+## Round 17: fewer instructions per record and per region
+callgrind on s7: the 200,000 region rows (the same count at every scale) took 14M instructions in a byte loop on the main thread, about 2.5 ms before any record is read; region ids now go through the 8-byte SWAR `dig`. The BOM test at each record start was `starts_with`, a `memcmp` call worth 3.5% of all instructions; it is three byte compares again (it went out with round 12's revert). 21 alternating runs: 0.141 -> 0.138 s at 4 threads, 0.150 -> 0.141 s with 12. Exact on s7, s42, t5, full.
