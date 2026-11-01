@@ -165,10 +165,6 @@ fn main() {
                     pg = g; pme = me; pj = j0;
                 }
                 if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
-                // hand back this part's pages now, on this thread, rather than all of them at exit
-                // on one. The neighbour before may still read a few bytes past its end, so a
-                // margin stays mapped at the front.
-                unmap(&c[(lo + 256).min(hi)..hi]);
                 agg
             })
         }).collect();
@@ -214,13 +210,6 @@ fn map(path: &str) -> &'static [u8] {
 #[inline(always)]
 fn prefetchw<T>(p: *const T) {
     unsafe { std::arch::asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags, readonly)) }
-}
-
-// munmap the whole pages inside `b`
-fn unmap(b: &[u8]) {
-    extern "C" { fn munmap(a: *const u8, l: usize) -> i32; }
-    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
-    if a < e { unsafe { munmap(a as *const u8, e - a); } }
 }
 
 const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
