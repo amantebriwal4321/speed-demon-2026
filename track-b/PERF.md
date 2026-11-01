@@ -116,3 +116,11 @@ Reading the 50,000 queries took 20-36 ms: a HashMap of 86k distinct words hit wi
 
 ## Round 18: 8-byte probe slots
 The scan probes slots of 32 hash bits over the value (8 bytes, table half the size of the u128 keys); keys[j] is read only when the hash bits match. vals is freed once the slots exist. Exact on s7, s42, t5, full; peak 79 -> 80 MB; faster in 5 of 6 later paired runs, e.g. 0.292/0.294/0.285 -> 0.275/0.280/0.273 s.
+
+## Round 19: one access per short-token lookup, 2 MB pages, one line per term
+Profiled on 4 cores (perf, software clock): the scan was 55% of CPU, and knocking pieces out showed tokenizing alone at about half of it, lookups and postings the rest. The hottest loads were the second access into the 4 MB `keys` table, the stall at the slot prefetch (TLB), `last[t]`, the `lock or` that flushes the common-term words, and `cnt[t]`.
+- `pack` loads 16 bytes at once and ORs in 0x20 (token bytes are letters and digits, and bit 5 lowercases both), instead of a variable-length copy and a per-byte case fix.
+- A slot is 16 bytes: the token's low 8 bytes, then its value and a 32-bit tag of its high 8 bytes. Tokens of 8 bytes or less (most of them) are matched with one access; longer ones also check `hi[j]`. The table is asked for 2 MB pages (MADV_HUGEPAGE) before it is filled.
+- A term's last doc and list length sit side by side in one `[u32; 2]`.
+- Common-term words between a thread's first and last word hold only its docs, so they are written with a plain store; only the first and last words use `fetch_or`.
+Exact on s7, s42, t5, full. Paired, 11 alternating runs: 0.625 -> 0.579 s (-7%), CPU 2.20 -> 2.00 s, cgroup peak 79 -> 80 MB. rustfmt lines 857 -> 866.

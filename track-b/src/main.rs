@@ -52,23 +52,14 @@ fn not(a: &[u16], b: &[u16]) -> Vec<u16> {
     a.iter().copied().filter(|&x| !seek(b, &mut j, x)).collect()
 }
 
-// a token of up to 16 bytes, ASCII lowercased, packed little endian into a u128 (zero padded)
+// a token of up to 16 bytes, lowercased, packed little endian into a u128 (zero padded).
+// Token bytes are ASCII letters and digits, and setting bit 5 lowercases all of them.
 #[inline]
 fn pack(b: &[u8], l: usize) -> u128 {
-    let word = |o: usize| -> u64 {
-        let mut x = [0u8; 8];
-        let n = b.len().saturating_sub(o).min(8);
-        x[..n].copy_from_slice(&b[o..o + n]);
-        let x = u64::from_le_bytes(x);
-        // set bit 5 of every byte in A..Z; token bytes are all ASCII letters or digits
-        let h = x & 0x7f7f7f7f7f7f7f7f;
-        let up = h.wrapping_add(0x3f3f3f3f3f3f3f3f) & !h.wrapping_add(0x2525252525252525) & !x & 0x8080808080808080;
-        x | up >> 2
-    };
-    let mask = |n: usize| if n >= 8 { u64::MAX } else { (1u64 << (8 * n)) - 1 };
-    let lo = word(0) & mask(l) as u64;
-    let hi = if l > 8 { word(8) & mask(l - 8) } else { 0 };
-    (hi as u128) << 64 | lo as u128
+    let mut x = [0u8; 16];
+    if b.len() >= 16 { x.copy_from_slice(&b[..16]) } else { x[..b.len()].copy_from_slice(b) }
+    let m = if l >= 16 { u128::MAX } else { (1u128 << (8 * l)) - 1 };
+    (u128::from_le_bytes(x) | 0x2020_2020_2020_2020_2020_2020_2020_2020) & m
 }
 
 // bit i set when b[at + i] is a token byte (a-z, A-Z, 0-9), and when it is LF; SSE2 only
@@ -149,7 +140,6 @@ fn main() {
     let cap = keys.len();
     let shift = 128 - cap.trailing_zeros();
     let h = |k: u128| (hm(k) >> (shift - 64)) as usize;
-
     let docs = map(&format!("{data}/docs.txt"));
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let mut cuts = vec![0usize];
@@ -203,24 +193,30 @@ fn main() {
     // a common term's table value becomes its bitset slot with the top bit set, so the scan
     // marks it without touching last[] or a side table
     for j in 0..cap { if keys[j] != 0 && bslot[vals[j] as usize] != u32::MAX { vals[j] = 1 << 31 | bslot[vals[j] as usize]; } }
-    // the scan probes `slots`: 32 bits of hash over the value, 8 bytes a slot instead of 16, so
-    // a token no query uses usually costs one access to a table half the size; keys[j] is only
-    // read when the hash bits match
-    let fp = |k: u128| hm(k) as u32 | 1;
-    let slots: Vec<u64> = (0..cap).map(|j| if keys[j] == 0 { 0 } else { (fp(keys[j]) as u64) << 32 | vals[j] as u64 }).collect();
+    // the scan probes `slots`, 16 bytes each: the token's low 8 bytes, then its value and a
+    // tag of its high 8 bytes (0 when it has none). Most tokens are 8 bytes or less, so a
+    // lookup is one access; a longer token checks its high half in `hi`.
+    let tag = |h: u64| if h == 0 { 0 } else { (h.wrapping_mul(0x9E3779B97F4A7C15) >> 32) as u64 | 1 };
+    let mut slots: Vec<[u64; 2]> = Vec::with_capacity(cap);
+    huge(&slots);
+    slots.extend((0..cap).map(|j| [keys[j] as u64, tag((keys[j] >> 64) as u64) << 32 | vals[j] as u64]));
+    let hi: Vec<u64> = keys.iter().map(|&k| (k >> 64) as u64).collect();
     drop(vals);
+    drop(keys);
     for v in long.values_mut() { if bslot[*v as usize] != u32::MAX { *v = 1 << 31 | bslot[*v as usize]; } }
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, slots, long, lower, abits) = (&keys, &slots, &long, &lower, &abits);
+            let (hi, slots, long, lower, abits) = (&hi, &slots, &long, &lower, &abits);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
-                let mut last = vec![u32::MAX; nall];
-                let mut cnt = vec![0u32; nall + 1];
+                // per term: the last doc that listed it and its list length so far, side by
+                // side so a posting touches one cache line
+                let mut lc = vec![[u32::MAX, 0]; nall];
+                let counts = |lc: &mut Vec<[u32; 2]>| -> Vec<u32> { std::iter::once(0).chain(lc.iter_mut().map(|e| std::mem::replace(e, [u32::MAX, 0])[1])).collect() };
                 let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
-                let (mut acc, mut aw) = (vec![0u64; nd], 0usize);
+                let (mut acc, mut aw, mut fw) = (vec![0u64; nd], usize::MAX, 0);
                 let mut i = 0;
                 // lists hold doc ids local to their part as u16, so a part closes at 65,536 docs
                 let mut done = Vec::new();
@@ -230,8 +226,7 @@ fn main() {
                     if p.doff.len() == 1 << 16 {
                         blocks.push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
                         let q = std::mem::replace(&mut p, Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() });
-                        done.push((q, std::mem::take(&mut blocks), std::mem::replace(&mut cnt, vec![0u32; nall + 1])));
-                        last.fill(u32::MAX);
+                        done.push((q, std::mem::take(&mut blocks), counts(&mut lc)));
                     }
                     if p.lo == u32::MAX { p.lo = doc; }
                     // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
@@ -240,19 +235,33 @@ fn main() {
                     blk.push(u16::MAX);
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
-                    // common terms gather 64 docs of bits locally, then one OR per word goes out
+                    // common terms gather 64 docs of bits locally, then each word goes out at once;
+                    // words between this thread's first and last hold only its docs, so a plain
+                    // store does, and only the first word (the last is below) needs an atomic OR
                     let g = (p.lo + d) as usize >> 6;
-                    if g != aw { for (x, a) in acc.iter_mut().enumerate() { if *a != 0 { abits[x * nw + aw].fetch_or(std::mem::take(a), Ordering::Relaxed); } } aw = g; }
+                    if g != aw {
+                        if aw == usize::MAX { fw = g; }
+                        for (x, a) in acc.iter_mut().enumerate().filter(|a| *a.1 != 0) {
+                            if aw == fw { abits[x * nw + aw].fetch_or(std::mem::take(a), Ordering::Relaxed); } else { abits[x * nw + aw].store(std::mem::take(a), Ordering::Relaxed); }
+                        }
+                        aw = g;
+                    }
                     i += 1;
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
-                            if t >> 31 == 1 { acc[(t & 0x7FFF_FFFF) as usize] |= 1 << ((p.lo + d) & 63); } else if last[t as usize] != d { last[t as usize] = d; { put(&mut blk, t); cnt[t as usize + 1] += 1; } }
+                            if t >> 31 == 1 { acc[(t & 0x7FFF_FFFF) as usize] |= 1 << ((p.lo + d) & 63); } else if lc[t as usize][0] != d { lc[t as usize] = [d, lc[t as usize][1] + 1]; put(&mut blk, t); }
                         } }} }
                     let lookup = |p: (u8, u128, usize, Option<u32>)| -> Option<u32> {
                         if p.0 == 2 { return p.3; }
                         let (k, mut j) = (p.1, p.2);
-                        let f = fp(k) as u64;
-                        loop { let x = slots[j]; if x == 0 { break None; } if x >> 32 == f && keys[j] == k { break Some(x as u32); } j = (j + 1) & (cap - 1); }
+                        let (lo, h) = (k as u64, (k >> 64) as u64);
+                        let g = tag(h);
+                        loop {
+                            let [a, b] = slots[j];
+                            if a == 0 { break None; }
+                            if a == lo && b >> 32 == g && (h == 0 || hi[j] == h) { break Some(b as u32); }
+                            j = (j + 1) & (cap - 1);
+                        }
                     };
                     let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
                     // token and LF bitmasks of a 64 byte window, then walk the bits
@@ -289,7 +298,7 @@ fn main() {
                 }
                 for (x, a) in acc.iter_mut().enumerate() { if *a != 0 { abits[x * nw + aw].fetch_or(*a, Ordering::Relaxed); } }
                 blocks.push(blk);
-                done.push((p, blocks, cnt));
+                done.push((p, blocks, counts(&mut lc)));
                 done
             })
         }).collect();
@@ -320,7 +329,6 @@ fn main() {
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-
     fn dl(p: &Part, t: u32) -> &[u16] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
 
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
@@ -419,6 +427,13 @@ fn main() {
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/results.txt"), o).unwrap();
     std::process::exit(0);
+}
+
+// ask for 2 MB pages before the first touch, so random probes into a big table don't miss the TLB
+fn huge<T>(v: &Vec<T>) {
+    extern "C" { fn madvise(a: usize, l: usize, advice: i32) -> i32; }
+    let (a, l) = (v.as_ptr() as usize, v.capacity() * std::mem::size_of::<T>());
+    unsafe { madvise(a & !4095, l + (a & 4095), 14) }; // MADV_HUGEPAGE
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
