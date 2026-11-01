@@ -58,6 +58,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Round 8
 
 - Building newid and the degrees in the new order was one serial loop of 1.7M random reads inside the relabel. It now runs on all threads, with only the prefix sum left serial. Local median over 25 alternating runs went from 0.247 s to 0.236 s.
+- Built for x86-64-v3 (AVX2, BMI, POPCNT) like track A, through `.cargo/config.toml`. Two rounds of 25 alternating runs gave 0.237 to 0.229 s and 0.220 to 0.209 s. The same flag on B and C showed nothing beyond the noise, so they stay as they are.
 
 ## Next ideas
 
