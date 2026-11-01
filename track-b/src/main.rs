@@ -369,7 +369,7 @@ fn main() {
     // queries are handed out RUN at a time, and a run's answers go into one buffer
     const RUN: usize = 64;
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len().div_ceil(RUN)).map(|_| Default::default()).collect();
-    let next = AtomicUsize::new(0);
+    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
@@ -471,7 +471,13 @@ fn main() {
                     o.push(b'\n');
                 }
                 res[b].set(o).ok();
-            }});
+            }
+            // with no queries left, this thread drops one share's page table entries, so the
+            // exit does not tear the whole mapping down on one thread. A query still running
+            // elsewhere that reads there just faults the page back in from the page cache.
+            let k = done.fetch_add(1, Ordering::Relaxed);
+            release(&docs[cuts[k]..cuts[k + 1]]);
+            });
         }
     });
     let mut o = Vec::new();
@@ -533,6 +539,14 @@ impl<const W: usize> Probe<W> {
 fn zeroed<T>(n: usize) -> Vec<T> {
     let l = std::alloc::Layout::array::<T>(n.max(1)).unwrap();
     unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(l) as *mut T, n, n.max(1)) }
+}
+
+// MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
+// this process's mapping of them goes
+fn release(b: &[u8]) {
+    extern "C" { fn madvise(a: *mut u8, l: usize, advice: i32) -> i32; }
+    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
+    if a < e { unsafe { madvise(a as *mut u8, e - a, 4) }; }
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
