@@ -105,3 +105,7 @@ Profile of the query loop (perf, 4 cores): about 30% of its samples are misses o
 
 ## Round 18: the biggest searches give their tables back
 A 2 ms trace of the cgroup usage with 12 threads: 73 MB at the CSR build, then the query phase climbing from 65 to 85 MB as each thread keeps the largest table and heap it ever grew. A table past 64K slots (512 KB) now goes back to the start size after its search, and heap buckets shrink to 4K entries; only the few biggest searches pay to grow again. Shrinking everything past 16K slots (round 17's try) cost 12%; this costs nothing measurable (11 alternating runs: queries 305 -> 298 ms). 12-thread peak 84-85 -> 80-81 MB. Exact on s7, s42, t5, full.
+
+## Round 19: no stale check on pop
+Every pop probed its own side's table to skip stale heap entries, but only 6% are stale. A stale pop cannot change anything: its node's smaller entry was popped first and relaxed every edge at that distance, so every relaxation from the stale one fails, and the radix heap only sees keys at or above the last pop. Dropping the check saves a probe on 94% of pops for a few failed relaxations on 6%. Exact on s7, s42, t5, full; queries 278 -> 270 ms over 11 alternating runs.
+Tried and dropped: claiming BFS nodes in a 218 KB bitset instead of the 7 MB owner array (the BFS cost is the adjacency reads; no change); an occupancy mask for the radix buckets (fill's cost is redistributing, not finding the bucket; no change).

@@ -308,8 +308,9 @@ fn main() {
                             if tf.saturating_add(tb) >= best { break; }
                             let side = if heap[0].len() <= heap[1].len() { 0 } else { 1 };
                             let lim = if side == 0 { tb } else { tf };
+                            // a stale entry (6% of pops) is not skipped: its node's smaller entry came
+                            // out first and relaxed every edge, so it improves nothing
                             let (d, u) = heap[side].pop();
-                            if d > dist[side].get(u) { continue; }
                             let (o, a) = g[side];
                             let [df, db] = &mut dist;
                             let (mine, other) = if side == 0 { (df, &*db) } else { (db, &*df) };
