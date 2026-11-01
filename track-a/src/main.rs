@@ -53,7 +53,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
-                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), text: Vec::new() };
+                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), text: vec![0; 64] };
                 let mut rows: Vec<Hr> = (0..HOURS).map(|_| Hr { blocks: Vec::new(), side: Vec::new() }).collect();
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
@@ -107,13 +107,16 @@ fn main() {
                             let x = unsafe { *e.slot.get_unchecked(s) };
                             if x == u32::MAX {
                                 let id = e.start.len() as u32;
+                                // the text keeps 64 zero bytes at its end, so eq() can always read 64 bytes from a start
+                                e.text.truncate(e.text.len() - 64);
                                 e.slot[s] = id; e.start.push(e.text.len() as u32); e.len.push(l as u32);
                                 e.text.extend_from_slice(&c[es..ee]);
+                                e.text.extend_from_slice(&[0; 64]);
                                 e.key.push((w0, w1, l as u32));
                                 break id;
                             }
                             let k = unsafe { e.key.get_unchecked(x as usize) };
-                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; e.text[st..st + l] == c[es..ee] }) { break x; }
+                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || eq(&e.text, e.start[x as usize] as usize, c, es, l)) { break x; }
                             s = (s + 1) & (TB - 1);
                         };
                         let r = unsafe { rows.get_unchecked_mut(hour) };
@@ -229,6 +232,19 @@ fn num(o: &mut Vec<u8>, mut x: u64) {
     while x >= 100 { let r = (x % 100) as usize; x /= 100; i -= 2; t[i..i + 2].copy_from_slice(&D[2 * r..2 * r + 2]); }
     if x >= 10 { i -= 2; t[i..i + 2].copy_from_slice(&D[2 * x as usize..2 * x as usize + 2]); } else { i -= 1; t[i] = b'0' + x as u8; }
     o.extend_from_slice(&t[i..]);
+}
+
+// are x[i..i + l] and y[j..j + l] equal (l > 0)? Two 32 byte compares when 64 bytes can be read from
+// both starts, a slice compare otherwise
+#[inline(always)]
+fn eq(x: &[u8], i: usize, y: &[u8], j: usize, l: usize) -> bool {
+    use std::arch::x86_64::*;
+    if l <= 64 && i + 64 <= x.len() && j + 64 <= y.len() {
+        let same = |k: usize| unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(x.as_ptr().add(i + k) as *const __m256i), _mm256_loadu_si256(y.as_ptr().add(j + k) as *const __m256i))) as u32 as u64 };
+        let want = u64::MAX >> (64 - l);
+        return (same(0) | same(32) << 32) & want == want;
+    }
+    x[i..i + l] == y[j..j + l]
 }
 
 // LFs in c[at .. at + 64]
