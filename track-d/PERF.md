@@ -130,3 +130,5 @@ The newid and relabel passes walk the nodes in BFS order and read the old graph 
 
 ## Round 25: look-ahead in the BFS
 The BFS queue is first in, first out, so the nodes it will expand next are known: each step prefetches the offsets of the node 16 places ahead and the edge list of the node 8 ahead. BFS phase 56 -> 46 ms over 13 alternating runs; end to end 0.431 -> 0.414 s at 4 threads, flat with 12 threads time-sliced on 4 cores. The same look-ahead in the CSR scatter saved 1 ms and was dropped. Exact on s7, s42, t5, full, h99, h3.
+Rounds 24 + 25 on the board: run-d3a4cf6ff601, 0.2196 s, 87.4 MB, 64.52 points, a new best (rank 33 of 98).
+Tried and dropped since: expanding the side that has reached fewer nodes (+4%) or strict alternation (+7%) instead of the smaller heap; prefetching a pushed node's edge list through its offset (within noise); mmap threshold 64 KB for the queries (peak the same).
