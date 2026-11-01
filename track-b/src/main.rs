@@ -413,9 +413,11 @@ fn main() {
     for t in pt.iter_mut() {
         *t = new[*t as usize];
     }
+    // qr and the renumbering's tables are done with here; they leave before the scan's peak
+    drop((c, order, new));
     let qs: Vec<Q> = qr
-        .iter()
-        .map(|&(b, a, e)| {
+        .into_iter()
+        .map(|(b, a, e)| {
             if b {
                 Q::Bool(&ops[a..e])
             } else {

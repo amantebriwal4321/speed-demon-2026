@@ -223,3 +223,6 @@ At exit the kernel tore the 254 MB docs mapping down on one thread. The docs are
 ## Round 42: glibc linked statically
 `-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.
 Reverted (round 44): board run-ca0df2585d96 0.2357 s and run-ee17ad2e8e9f 0.2838 s, against a median of 0.229 s over the nine runs of rounds 36-42. Like round 37, faster locally and slower on the scoring box; the scan goes back to taking its own page faults.
+
+## Round 45: query temporaries dropped before the scan
+The query ranges (`qr`, 1.2 MB, its own mapping) and the renumbering's three tables (counts, order, new ids: 300 KB each) lived to the end of the run, through the scan's and the fill's peak, though nothing reads them once the queries are built. They are dropped right there now. With THP `always` and 12 threads forced, four runs each: peak 60-63 MB against 58-61 MB. Exact on s7, s42, t5, full, h99, h3.
