@@ -183,3 +183,4 @@ Round 32 on the board: run-7cbce8dfc2fe 0.2489 s, 69.7 MB; run-ff5ca3c4b651 0.24
 
 ## Round 33: mmap threshold 128 KB (board experiment)
 Each scan thread keeps about 1 MB of counters, offsets and doc starts below the old 1 MB threshold, so in its malloc arena, and a kernel with THP set to `always` backs an arena heap in 2 MB pages. At 128 KB those buffers get their own small mappings. With THP `always` locally and 12 threads, peaks of 59-63 MB against 63-64 MB; time the same (11 alternating runs at 4 and 12 threads). Exact on s7, s42, t5, full, h99, h3.
+Reverted: board run-7757b367dc86 gave 0.2894 s at 67.3 MB. The run before it on unchanged code was also slow (0.2704 s), but many small mappings cost A time on the board through the address-space lock, and 2 MB is not worth that risk.

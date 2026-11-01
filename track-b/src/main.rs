@@ -108,11 +108,10 @@ impl<'a> Tab<'a> {
 }
 
 fn main() {
-    // anything from 128 KB up gets its own mapping: a freed posting block goes back to the
-    // kernel, and the threads' counters and offsets stay out of their malloc arenas, which a
-    // kernel with transparent huge pages backs (and charges) 2 MB at a time
+    // keep big blocks on their own mappings, so a freed posting block goes back to the kernel
+    // (glibc would otherwise raise its mmap threshold and keep them in the heap)
     extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
-    unsafe { mallopt(-3, 1 << 17) }; // M_MMAP_THRESHOLD
+    unsafe { mallopt(-3, 1 << 20) }; // M_MMAP_THRESHOLD
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
     let qb = map(&format!("{data}/queries.txt"));
