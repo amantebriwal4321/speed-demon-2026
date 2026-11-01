@@ -144,3 +144,8 @@ Board: run-fbcf3441c1ac, 0.2499 s, 92.5 MB, 64.99 points, rank 27 of 85; later r
 - Query terms got their ids in a second pass that prefetches the table 8 words ahead: -2.5 ms of the 35 ms parse. Stubbing the term lookup out leaves 13.5 ms, so the parse is allocations, splitting and page faults more than table misses. A table sized up front: no change.
 - Dense-term cutoff at 1 doc in 24 or 16 instead of 48: peak 76-78 MB either way, time within noise. A memory trace (cgroup usage every 2 ms) puts the peak in the fill, when every part's lists are allocated while all the blocks are still alive: 49 MB at the end of the scan, 71-78 MB in the fill, 50 MB after.
 - The fill in two waves of half the parts: peak 75-78 -> 71-72 MB with 12 threads, but the fill took 24 -> 40 ms locally.
+
+## Round 23: less at the fill peak
+- The two token tables are mmap'd, so nothing freed them; they are unmapped (a Drop on Probe) right after the scan, before the fill.
+- The fill used a copy of each part's offsets as cursors (300 KB a part). It now moves the offsets themselves from each term's start to its end, which is the next term's start, and shifts them back by one.
+With 12 threads forced, the cgroup peak goes from 77-78 MB to 66-70 MB, and a 2 ms memory trace now tops out at 66 MB in the fill (61 MB at the end of the scan, 57-59 MB in the queries) where it had a spike to 78 MB. Exact on s7, s42, t5, full; 11 paired runs 0.514 -> 0.503 s (noise).

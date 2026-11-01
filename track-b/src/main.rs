@@ -297,13 +297,13 @@ fn main() {
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
+    drop((short, longer));
     // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
     // which leaves out nearly half the postings
     let parts: Vec<Part> = std::thread::scope(|sc| {
         let hs: Vec<_> = scan.into_iter().flatten().map(|(mut p, blocks, mut cnt)| {
             sc.spawn(move || {
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
-                let mut cur = cnt.clone();
                 let mut lists = vec![0u16; cnt[nall] as usize];
                 let mut d = u16::MAX;
                 for b in blocks {
@@ -312,10 +312,13 @@ fn main() {
                         let mut t = b[q] as u32; q += 1;
                         if t == 0xFFFF { d = d.wrapping_add(1); continue; }
                         if t == 0xFFFE { t = (b[q] as u32) << 16 | b[q + 1] as u32; q += 2; }
-                        lists[cur[t as usize] as usize] = d;
-                        cur[t as usize] += 1;
+                        lists[cnt[t as usize] as usize] = d;
+                        cnt[t as usize] += 1;
                     }
                 }
+                // each start was moved to its term's end, the next term's start: shift back
+                cnt.rotate_right(1);
+                cnt[0] = 0;
                 p.lists = lists; p.loff = cnt;
                 p
             })
@@ -429,6 +432,13 @@ fn main() {
 // aligned from mmap, so none straddles a cache line, and are asked for 2 MB pages, so
 // random probes don't miss the TLB.
 struct Probe<const W: usize> { s: &'static mut [[u64; W]], sh: u32 }
+// unmapped as soon as the scan is done, so the tables are gone before the fill's peak
+impl<const W: usize> Drop for Probe<W> {
+    fn drop(&mut self) {
+        extern "C" { fn munmap(a: *mut u8, l: usize) -> i32; }
+        unsafe { munmap(self.s.as_mut_ptr() as *mut u8, self.s.len() * 8 * W) };
+    }
+}
 impl<const W: usize> Probe<W> {
     fn new(items: impl Iterator<Item = (u128, u32)> + Clone) -> Self {
         extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; fn madvise(a: *mut u8, l: usize, advice: i32) -> i32; }
