@@ -117,3 +117,8 @@ C's round 24 on A: once a thread has parsed its share of the log it never reads 
 
 ## Round 29: glibc linked statically
 `-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 30: two small cuts in the hour and parse loops
+- An hour's gather buffer was cleared to its new length every hour (`clear` then `resize`: a 170 KB memset, 1.4% of the instructions on s7), but the scatter writes every slot below the hour's row count, so it now only grows.
+- A thread's region of each hour is looked up from a 72-entry array made once, instead of computed with a multiply on every line.
+s7: 134.5M -> 131.9M instructions; 31 alternating runs: 60.0 -> 59.2 ms. Exact on s7, s42, t5, full, h99, h3.
