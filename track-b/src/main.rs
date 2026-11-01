@@ -302,10 +302,10 @@ fn main() {
     drop((short, longer));
     // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
     // which leaves out nearly half the postings
-    // the fill runs in two waves: a part's blocks and its lists are both alive while it fills,
-    // so filling half the parts at a time keeps a quarter of the postings fewer at the peak
+    // the fill runs in three waves: a part's blocks and its lists are both alive while it fills,
+    // so filling a third of the parts at a time keeps a third of the lists off the peak
     let mut todo: Vec<_> = scan.into_iter().flatten().collect();
-    let wave = todo.len().div_ceil(2);
+    let wave = todo.len().div_ceil(3);
     let mut parts: Vec<Part> = Vec::new();
     while !todo.is_empty() {
     let now: Vec<_> = todo.drain(..wave.min(todo.len())).collect();

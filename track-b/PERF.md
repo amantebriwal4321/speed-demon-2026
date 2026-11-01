@@ -168,3 +168,7 @@ Rounds 26 + 27 on the board: run-1b96537f4b64 0.2485 s, 86.5 MB; run-0737b5e506e
 
 ## Round 29: the fill in two waves (board experiment)
 The board's peak is the fill: with 12 real cores every scan thread finishes at about the same time, so all 12 parts hold their blocks and their new lists at once (about 61 + 24 MB, close to the board's 86-87 MB). Filling half the parts, then the other half, keeps a quarter of the postings fewer alive at the peak. Locally the spike barely shows (12 threads on 4 cores never overlap fully: peaks 67-72 against 70-74 MB) and the fill time is the same, so this one is judged on the board: it should take about 12 MB off M and add a few ms of fill. Exact on s7, s42, t5, full.
+Board: run-abf05797d461, 0.2433 s, 75.9 MB (from 86.7), 66.05 points, a new best, rank 27 -> 24 of 87. No time cost visible.
+
+## Round 30: three waves
+At the fill peak, w waves keep about 24/w MB of lists alive on top of the 61 MB the scan ends with. 12 threads forced, three runs each: 2 waves 68-70 MB, 3 waves 66-67, 4 waves 65-67. Three, since each wave fills fewer parts at once. Exact on s7, s42, t5, full.
