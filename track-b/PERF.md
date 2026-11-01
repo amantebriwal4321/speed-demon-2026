@@ -56,6 +56,13 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 - A 32 KB filter of query term hashes sits in front of the 4 MB term table, so a token that can't be a query term skips the prefetch and the probe. Locally that's about 2% faster, but on the board it ran 0.379 s against 0.355 to 0.357 s for the version before it (run-bdb28e0d53a4), so it was reverted. An earlier 128 KB term bitmap came out in 9007210, and this one is a quarter of the size.
 
+## Round 8 (rewrite attempts in a separate folder, none swapped in)
+
+- 79% of document tokens are query terms, so filters and caches that skip tokens can't save much.
+- Tried: a direct table for tokens of 3 bytes or less (30% of tokens), skipping the hash. Slower (median 0.320 to 0.333 s, then 0.349 to 0.367 s).
+- Tried: dense query terms going straight into bitsets at fill time, so their lists are never stored. Every thread then has to keep its blocks until the global counts are known, so the peak rose from 142 to 163 MB and the median from 0.349 to 0.375 s.
+- Tried: two role bits per term (starts or ends a phrase pair) in front of the pair hash. No faster. Taking the pair work out entirely, which is wrong but shows the cost, saves 30 to 55 ms of the roughly 200 ms index build.
+
 ## Next ideas
 
 Tokenizing is the largest piece again, then the phrase checks.
