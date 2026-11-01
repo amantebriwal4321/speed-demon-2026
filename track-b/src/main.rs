@@ -302,8 +302,15 @@ fn main() {
     drop((short, longer));
     // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
     // which leaves out nearly half the postings
-    let parts: Vec<Part> = std::thread::scope(|sc| {
-        let hs: Vec<_> = scan.into_iter().flatten().map(|(mut p, blocks, mut cnt)| {
+    // the fill runs in two waves: a part's blocks and its lists are both alive while it fills,
+    // so filling half the parts at a time keeps a quarter of the postings fewer at the peak
+    let mut todo: Vec<_> = scan.into_iter().flatten().collect();
+    let wave = todo.len().div_ceil(2);
+    let mut parts: Vec<Part> = Vec::new();
+    while !todo.is_empty() {
+    let now: Vec<_> = todo.drain(..wave.min(todo.len())).collect();
+    parts.extend(std::thread::scope(|sc| {
+        let hs: Vec<_> = now.into_iter().map(|(mut p, blocks, mut cnt)| {
             sc.spawn(move || {
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut lists = vec![0u16; cnt[nall] as usize];
@@ -325,8 +332,9 @@ fn main() {
                 p
             })
         }).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
+        hs.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+    }));
+    }
     fn dl(p: &Part, t: u32) -> &[u16] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
 
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears

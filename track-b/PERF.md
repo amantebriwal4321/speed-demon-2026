@@ -164,3 +164,7 @@ With 12 threads there are 12 parts, and every query is answered part by part. A 
 
 ## Round 28: round 25 out again
 Board run-72bb1848af23 (rounds 25-27): 0.2441 s but 92.5 MB, against 86.9 MB before. With transparent huge pages set to `always` locally (the board's kernel evidently backs anonymous memory with 2 MB pages: A's and C's arena and calloc changes in the same run cost 6 to 8 MB there too), the 12-thread peak of round 25 is 83-84 MB against 68-79 MB for round 23; rounds 26 and 27 without 25 are at 69-75 MB. So the parallel query parse is out (its many 64 KB+ temporaries cost whole huge pages), and 26 and 27 stay. Exact on s7, s42, t5, full. Local memory checks from here on run with THP set to `always`.
+Rounds 26 + 27 on the board: run-1b96537f4b64 0.2485 s, 86.5 MB; run-0737b5e506ee 0.2452 s, 86.7 MB. No visible change from round 23.
+
+## Round 29: the fill in two waves (board experiment)
+The board's peak is the fill: with 12 real cores every scan thread finishes at about the same time, so all 12 parts hold their blocks and their new lists at once (about 61 + 24 MB, close to the board's 86-87 MB). Filling half the parts, then the other half, keeps a quarter of the postings fewer alive at the peak. Locally the spike barely shows (12 threads on 4 cores never overlap fully: peaks 67-72 against 70-74 MB) and the fill time is the same, so this one is judged on the board: it should take about 12 MB off M and add a few ms of fill. Exact on s7, s42, t5, full.
