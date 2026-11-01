@@ -74,3 +74,4 @@ Lines parsed into batches of 16 or 64, lookups run per batch so they can overlap
 
 ## Round 18: endpoint names compared in cache
 perf on 4 cores put `memcmp` at 8.8% of samples: an endpoint over 16 bytes that matched a slot's hash words was compared byte for byte against its first line, somewhere random in the 239 MB file, so most of those compares missed to memory. Each thread now copies an endpoint's text into its own small arena when it first sees it (1,842 names, about 55 KB), and the compare and the later name sort read from there. Exact on s7, s42, t5, full. Paired, 21 alternating runs, twice: 0.095 -> 0.084 s and 0.094 -> 0.088 s, CPU -5 to -11%; cgroup peak 15-16 MB both. rustfmt lines 385 -> 386.
+Board: run-d5ef932cf47c, 0.0379 s, 22.1 MB, 76.97 points; the old code ran 0.0366 to 0.046 s, so one run cannot tell.

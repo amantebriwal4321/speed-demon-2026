@@ -124,14 +124,23 @@ Profiled on 4 cores (perf, software clock): the scan was 55% of CPU, and knockin
 - A term's last doc and list length sit side by side in one `[u32; 2]`.
 - Common-term words between a thread's first and last word hold only its docs, so they are written with a plain store; only the first and last words use `fetch_or`.
 Exact on s7, s42, t5, full. Paired, 11 alternating runs: 0.625 -> 0.579 s (-7%), CPU 2.20 -> 2.00 s, cgroup peak 79 -> 80 MB. rustfmt lines 857 -> 866.
+Board: run-a96a453972ab, 0.319 s, 95.3 MB, 62.44 points. That run was slow on every track (unchanged C went 0.058 -> 0.068 s), so it says little.
 
 ## Round 20: phrases anchored on their rarest word
 214,226 candidate docs went through the phrase check, 19,332 matched, and it scanned 438 MB of doc text looking for the first byte of the phrase's first word (often `t`, `a` or `o`), calling the matcher at each hit. The check now looks for the first two bytes of the phrase word with the shortest doc list (ties: the longest word), case folded, 32 bytes a step with AVX2, then matches the words after it forward and the words before it backward, all as whole tokens. Paired, 11 alternating runs: 0.574 -> 0.494 s (-14%).
 The count and sum of a big BOOL answer came from 8 byte-table lookups per bitset word, in a loop whose counter the compiler kept on the stack. Bit k of a position is set exactly on the positions in a fixed mask, so a word's positions sum to six masked popcounts shifted by k. 0.532 -> 0.514 s (-3%), CPU -5%.
 Exact on s7, s42, t5, full. Both together against round 19: 0.609 -> 0.566 s in one paired set of 11 (the box is noisy), peak 80 MB. rustfmt lines 866 -> 901.
+Board: run-96a07446a51b, 0.2487 s, 97.2 MB, 64.94 points, a new best, rank 34 -> 28 of 85.
 
 ## Round 21: term ids by frequency, tables split by token length, u16 counters
 - Term ids are renumbered after the sample, most docs first. The common terms are then ids 0..nd, so the scan tests `t < nd` instead of a flag bit and a slot table, and the next most frequent terms' counters sit together. -1.5% wall, -3.5% CPU.
 - 20% of doc tokens are 9 to 16 bytes, and each of those paid a second miss on the high-half check. Short tokens (8 bytes or less, 49,402 of the 75,747 query terms) now go to a table of 16-byte slots [bytes, value], longer ones to a table of 32-byte slots [low, high, value, 0]. Every lookup is one access, the tables are 2 MB each instead of 4 + 2 MB, and they are page aligned (from mmap, so no 32-byte slot straddles a cache line) and on 2 MB pages. -1% wall, -3% CPU, peak -2 MB.
 - A part closes at 65,535 docs instead of 65,536, so a term's last doc and its count both fit in u16: the per-thread counters go from 690 KB to 345 KB. -5%. Checked with parts closing every 1,000 docs and with 12 threads forced, since with 4 threads no thread here reaches a second part.
 Exact on s7, s42, t5, full. Against round 20, 11 alternating runs: 0.561 -> 0.526 s (-6%), CPU 1.87 -> 1.75 s, peak 80 -> 77 MB. rustfmt lines 901 -> 932.
+Board: run-fbcf3441c1ac, 0.2499 s, 92.5 MB, 64.99 points, rank 27 of 85; later runs of the same code: 0.3168 s (run-1c84a6dbc125, a slow run on every track) and 0.2492 s, 91.0 MB, 65.09 points (run-b006af567da4).
+
+## Round 22: tries that lost (not kept)
+- A ring of 2 to 8 pending lookups instead of one, flushed at each doc end: depth 4 vs 1 moved the scan -9 ms but the total not at all, and depth 8 was slower. Profiling a tokenize-only build (lookups and postings cut out: scan 135 ms of 250 locally) shows a fifth of it stalled on the prefetches themselves.
+- Query terms got their ids in a second pass that prefetches the table 8 words ahead: -2.5 ms of the 35 ms parse. Stubbing the term lookup out leaves 13.5 ms, so the parse is allocations, splitting and page faults more than table misses. A table sized up front: no change.
+- Dense-term cutoff at 1 doc in 24 or 16 instead of 48: peak 76-78 MB either way, time within noise. A memory trace (cgroup usage every 2 ms) puts the peak in the fill, when every part's lists are allocated while all the blocks are still alive: 49 MB at the end of the scan, 71-78 MB in the fill, 50 MB after.
+- The fill in two waves of half the parts: peak 75-78 -> 71-72 MB with 12 threads, but the fill took 24 -> 40 ms locally.

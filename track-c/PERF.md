@@ -82,3 +82,4 @@ Profiled on 4 cores: the hottest load in the record loop (37% of it) was `lookup
 - Tried and dropped: the three tables on 2 MB pages (-4% time but the peak went 9 -> 13 MB, a loss with M^0.2), and MADV_POPULATE_READ on each thread's part of the file (page faults are 12% of CPU, but it moved -1.7%, inside the noise).
 - A record is a one-record `Agg`, merged with the same `merge` the totals use.
 Exact on s7, s42, t5, full. Against round 11, 15 alternating runs: 0.149 -> 0.119 s (-20%), CPU 0.49 -> 0.39 s, peak 9 MB both. rustfmt lines 361 -> 390.
+Board: run-960c1d720e2e, 0.0985 s (a slow run for every track: unchanged B went 0.250 -> 0.317 s), then run-501ebf874bb0, 0.0607 s, 12.7 MB, 70.06 points. With 12 threads the gain seen on 4 cores does not show; the old code ran 0.058 to 0.068 s.

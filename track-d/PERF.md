@@ -96,6 +96,7 @@ With the thread count forced to 12 (the board's), the local cgroup peak is 98 MB
 - Before the queries the mmap threshold is fixed at 128 KB (so an outgrown table goes back to the kernel) and malloc_trim(0) hands back what the build freed. Fixing the threshold from the start instead gave 80 MB but cost 5% in the build phases (fresh pages for every big buffer).
 - The `used` list stops growing at 1/16 of the table, the point where clearing falls back to a fill anyway.
 12-thread peak 98 -> 84 MB; time neutral (per-phase medians over 11-13 alternating runs within +0.4%). Exact on s7, s42, t5, full. rustfmt lines 541 -> 554.
+Board: run-c3e3ece89411, 0.2352 s, 91.4 MB (from 102.8 to 107.4 MB), 63.78 points, a new best, rank 40 -> 36 of 95.
 Tried and dropped, all exact:
 - Dist slot from the BFS-ordered id itself (`v & mask`) for locality: +15%, linear-probe clustering. Hashing groups of 8 ids so a group shares a line: no change.
 - Expanding the side with the smaller top key instead of the smaller heap: 3.4x slower (the graph is far from symmetric).
