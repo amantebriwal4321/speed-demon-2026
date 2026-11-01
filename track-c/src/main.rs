@@ -61,23 +61,23 @@ fn main() {
     // A code [A-Z]{3} is a number below 26^3, so counting the codes in numeric order sorts them.
     let r = map(&format!("{data}/regions.csv"));
     let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    let mut raw: Vec<u16> = Vec::new(); // region_id -> code, u16::MAX if absent
+    let mut lookup: Vec<u16> = Vec::new(); // region_id -> code here, u16::MAX if absent; -> rank below
     while i < r.len() {
         let mut id = 0usize;
         while r[i] != b',' { id = id * 10 + (r[i] - b'0') as usize; i += 1; }
         let c = &r[i + 1..i + 4];
-        if raw.len() <= id { raw.resize(id + 1, u16::MAX); }
-        raw[id] = (c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16;
+        if lookup.len() <= id { lookup.resize(id + 1, u16::MAX); }
+        lookup[id] = (c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16;
         i += 5;
     }
     let mut rank = vec![u16::MAX; 17576];
-    for &c in &raw { if c != u16::MAX { rank[c as usize] = 0; } }
+    for &c in &lookup { if c != u16::MAX { rank[c as usize] = 0; } }
     let mut names: Vec<[u8; 3]> = Vec::new();
     for c in 0..17576 {
         if rank[c] == 0 { rank[c] = names.len() as u16; names.push([b'A' + (c / 676) as u8, b'A' + (c / 26 % 26) as u8, b'A' + (c % 26) as u8]); }
     }
     let unm = names.len() as u16;
-    let lookup: Vec<u16> = raw.iter().map(|&c| if c == u16::MAX { unm } else { rank[c as usize] }).collect();
+    for c in lookup.iter_mut() { *c = if *c == u16::MAX { unm } else { rank[*c as usize] }; }
     let ng = names.len() + 1;
 
     let b = map(&format!("{data}/records.csv"));
