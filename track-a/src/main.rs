@@ -136,6 +136,11 @@ fn main() {
                     }
                     blk += 64;
                 }
+                // drop this share's page table entries now, on this thread, rather than all of
+                // them at exit on one; the text is never read again. madvise, unlike munmap, does
+                // not lock out the other threads' page faults. The thread before may read a few
+                // bytes past its end, so a margin stays mapped at the front.
+                release(&b[(lo + 256).min(hi)..hi]);
                 (e, n, side)
             })
         }).collect();
@@ -308,6 +313,13 @@ fn sp16(c: &[u8], at: usize) -> u32 {
 }
 
 
+
+// MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
+// this process's mapping of them goes
+fn release(b: &[u8]) {
+    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
+    if a < e { unsafe { madvise(a as *mut u8, e - a, 4) }; }
+}
 
 // read-only mmap of the input; page cache pages are not charged to us
 fn map(path: &str) -> &'static [u8] {
