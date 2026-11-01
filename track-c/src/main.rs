@@ -102,10 +102,13 @@ fn main() {
     p += b[p..].iter().position(|&c| c == b'\n').unwrap() + 1;
     let body = &b[p..];
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    // a CR only ever appears as the first byte of a CRLF terminator, so cutting after "\r\n" is safe
+    // a CR only ever appears as the first byte of a CRLF terminator, so cutting after "\r\n" is safe.
+    // Four pieces per thread, handed out as threads come free: on the board two threads share
+    // each core, and one whose neighbour is busier gets through fewer pieces.
+    let np = 4 * nt;
     let mut cuts = vec![0usize];
-    for k in 1..nt {
-        let mut q = (body.len() * k / nt).max(*cuts.last().unwrap());
+    for k in 1..np {
+        let mut q = (body.len() * k / np).max(*cuts.last().unwrap());
         while q < body.len() && !(q >= 2 && body[q - 2] == b'\r' && body[q - 1] == b'\n') { q += 1; }
         cuts.push(q);
     }
@@ -117,59 +120,64 @@ fn main() {
     let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|k| {
-            let (lo, hi) = (cuts[k], cuts[k + 1]);
-            let (lookup, table, seen) = (&lookup, &table, &seen);
+        let hs: Vec<_> = (0..nt).map(|_| {
+            let (lookup, table, seen, cuts, next) = (&lookup, &table, &seen, &cuts, &next);
             sc.spawn(move || {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
-                let mut i = lo;
                 let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
-                while i < hi {
-                    if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] { i += 3; }
-                    let id = dig(c, &mut i) as i64;
-                    i += 1;
-                    let (ns, ne, nl) = field(c, &mut i);
-                    let (_, _, tl) = field(c, &mut i);
-                    let rid = dig(c, &mut i) as usize;
-                    i += 1;
-                    let neg = c[i] == b'-';
-                    if neg { i += 1; }
-                    // amount is digits, a dot, then exactly two digits
-                    let mut a = dig(c, &mut i) as i64;
-                    a = a * 100 + ((c[i + 1] - b'0') * 10 + (c[i + 2] - b'0')) as i64;
-                    i += 3;
-                    if c[i] == b'\r' { i += 1; }
-                    i += 1;
-                    if neg { a = -a; }
-                    let g = lookup(rid) as usize;
-                    let x = &mut agg[g];
-                    x.count += 1; x.id_sum += id; x.sum += a;
-                    if a < x.min { x.min = a; }
-                    if a > x.max { x.max = a; }
-                    x.name_bytes += nl; x.note_bytes += tl;
-                    let h = fx(c, ns, ne);
-                    // names are told apart by a 64 bit hash of their bytes and length; with
-                    // 100,000 names a collision has odds near 1 in 10^9
-                    let me = ((h ^ (ne - ns) as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
-                    let j0 = (h >> (64 - SLOTS.trailing_zeros())) as usize; // the high bits, the best mixed
-                    // prefetch this record's slot and seen word, then insert the previous record,
-                    // so the two cache misses overlap the parse of the next record
-                    unsafe {
-                        use std::arch::x86_64::*;
-                        _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
-                        prefetchw(seen.as_ptr().add(g * words + j0 / 64));
+                loop {
+                    let p = next.fetch_add(1, Relaxed);
+                    if p >= np { break; }
+                    let (lo, hi) = (cuts[p], cuts[p + 1]);
+                    let mut i = lo;
+                    while i < hi {
+                        if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] { i += 3; }
+                        let id = dig(c, &mut i) as i64;
+                        i += 1;
+                        let (ns, ne, nl) = field(c, &mut i);
+                        let (_, _, tl) = field(c, &mut i);
+                        let rid = dig(c, &mut i) as usize;
+                        i += 1;
+                        let neg = c[i] == b'-';
+                        if neg { i += 1; }
+                        // amount is digits, a dot, then exactly two digits
+                        let mut a = dig(c, &mut i) as i64;
+                        a = a * 100 + ((c[i + 1] - b'0') * 10 + (c[i + 2] - b'0')) as i64;
+                        i += 3;
+                        if c[i] == b'\r' { i += 1; }
+                        i += 1;
+                        if neg { a = -a; }
+                        let g = lookup(rid) as usize;
+                        let x = &mut agg[g];
+                        x.count += 1; x.id_sum += id; x.sum += a;
+                        if a < x.min { x.min = a; }
+                        if a > x.max { x.max = a; }
+                        x.name_bytes += nl; x.note_bytes += tl;
+                        let h = fx(c, ns, ne);
+                        // names are told apart by a 64 bit hash of their bytes and length; with
+                        // 100,000 names a collision has odds near 1 in 10^9
+                        let me = ((h ^ (ne - ns) as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
+                        let j0 = (h >> (64 - SLOTS.trailing_zeros())) as usize; // the high bits, the best mixed
+                        // prefetch this record's slot and seen word, then insert the previous record,
+                        // so the two cache misses overlap the parse of the next record
+                        unsafe {
+                            use std::arch::x86_64::*;
+                            _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
+                            prefetchw(seen.as_ptr().add(g * words + j0 / 64));
+                        }
+                        if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
+                        pg = g; pme = me; pj = j0;
                     }
-                    if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
-                    pg = g; pme = me; pj = j0;
+                    // drop this piece's page table entries now, on this thread, rather than all of
+                    // them at exit on one (madvise, unlike munmap, does not lock out the other threads'
+                    // page faults). The piece before may still read a few bytes past its end, so a
+                    // margin stays mapped at the front (and anything read again faults back in).
+                    release(&c[(lo + 256).min(hi)..hi]);
                 }
                 if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
-                // drop this part's page table entries now, on this thread, rather than all of
-                // them at exit on one (madvise, unlike munmap, does not lock out the other threads'
-                // page faults). The neighbour before may still read a few bytes past its end, so a
-                // margin stays mapped at the front.
-                release(&c[(lo + 256).min(hi)..hi]);
                 agg
             })
         }).collect();

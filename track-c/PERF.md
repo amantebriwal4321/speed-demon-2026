@@ -132,3 +132,6 @@ Board: run-ec061f0e5e7d 0.0393 s, 9.7 MB, 75.87 points, a new best (from 74.92),
 
 ## Round 25: glibc linked statically
 `-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 26: pieces handed out as threads come free (board experiment)
+Round 10 tried this on 4 cores without SMT, where every thread runs at the same speed and the fixed split is already even. On the board two threads share each core, so a thread whose neighbour is busier goes slower and the last one decides the end. The file is now cut into four pieces per thread and each thread takes the next piece from an atomic counter; the pending insert carries over from one piece to the next, and each piece's pages are dropped when it is done. Locally neutral (21 alternating runs: 128.5 -> 127.7 ms at 4 threads, 120.0 -> 122.8 ms with 12 forced); peak 6 MB as before. Exact on s7, s42, t5, full, h99, h3.
