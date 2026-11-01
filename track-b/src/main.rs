@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-type FxMap<K, V> = HashMap<K, V>;
 
 
 
@@ -84,71 +83,96 @@ fn masks(b: &[u8], at: usize) -> (u64, u64) {
 }
 
 fn hm(k: u128) -> u64 { (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F) }
-// query terms go straight into the scan's table: open addressing on the packed token, grown
-// at half full; terms over 16 bytes go to a small map. Ids are handed out in first-seen order.
-struct Tab<'a> { keys: Vec<u128>, vals: Vec<u32>, n: u32, long: FxMap<&'a [u8], u32> }
-impl<'a> Tab<'a> {
-    fn put(keys: &mut [u128], vals: &mut [u32], k: u128, v: u32) -> u32 {
-        let (m, sh) = (keys.len() - 1, 64 - keys.len().trailing_zeros());
-        let mut i = (hm(k) >> sh) as usize;
-        loop { if keys[i] == k { return vals[i]; } if keys[i] == 0 { keys[i] = k; vals[i] = v; return v; } i = (i + 1) & m; }
-    }
-    fn term(&mut self, t: &'a [u8]) -> u32 {
-        let n = self.n;
-        let id = if t.len() > 16 { *self.long.entry(t).or_insert(n) } else { Self::put(&mut self.keys, &mut self.vals, pack(t, t.len()), n) };
-        if id == n { self.n += 1; }
-        if self.n as usize * 2 > self.keys.len() {
-            let c = self.keys.len() * 2;
-            let (ok, ov) = (std::mem::replace(&mut self.keys, vec![0; c]), std::mem::replace(&mut self.vals, vec![0; c]));
-            for (k, v) in ok.into_iter().zip(ov) { if k != 0 { Self::put(&mut self.keys, &mut self.vals, k, v); } }
-        }
-        id
-    }
-}
 
 fn main() {
     // keep big blocks on their own mappings, so a freed pair block goes back to the kernel
     // (glibc would otherwise raise its mmap threshold and keep them in the heap)
     extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
-    unsafe { mallopt(-3, 1 << 20) }; // M_MMAP_THRESHOLD
+    // 64 KB while the queries are read on all threads, so their big temporaries go back to the
+    // kernel instead of staying in twelve malloc arenas; 1 MB from the scan on
+    unsafe { mallopt(-3, 1 << 16) }; // M_MMAP_THRESHOLD
     let data = std::env::var("DATA").unwrap_or("/data".into());
     let out = std::env::var("OUT").unwrap_or("/out".into());
     let qb = map(&format!("{data}/queries.txt"));
 
-    // queries first: only the terms they use get indexed
-    let mut tab = Tab { keys: vec![0; 1 << 12], vals: vec![0; 1 << 12], n: 0, long: HashMap::new() };
-    let mut qs = Vec::new();
-    for line in qb.split(|&c| c == b'\n') {
-        if line.is_empty() { continue; }
-        if line.starts_with(b"BOOL ") {
-            let w: Vec<&[u8]> = line[5..].split(|&c| c == b' ').collect();
-            let mut v = vec![(0u8, tab.term(w[0]))];
-            for k in (1..w.len()).step_by(2) {
-                let op = match w[k] { b"AND" => 1, b"OR" => 2, _ => 3 };
-                v.push((op, tab.term(w[k + 1])));
-            }
-            qs.push(Q::Bool(v));
-        } else {
-            let inner = &line[8..line.len() - 1];
-            let w: Vec<&[u8]> = inner.split(|&c| c == b' ').collect();
-            qs.push(Q::Phrase((w.iter().map(|t| tab.term(t)).collect(), w.clone())));
-        }
-    }
-    let nterm = tab.n as usize;
-    let nall = nterm;
-    let Tab { keys, mut vals, mut long, .. } = tab;
-    let cap = keys.len();
-    let shift = 128 - cap.trailing_zeros();
-    let h = |k: u128| (hm(k) >> (shift - 64)) as usize;
-    let docs = map(&format!("{data}/docs.txt"));
     let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    let mut cuts = vec![0usize];
-    for k in 1..nt {
-        let mut p = (docs.len() * k / nt).max(*cuts.last().unwrap());
-        while p < docs.len() && p > 0 && docs[p - 1] != b'\n' { p += 1; }
-        cuts.push(p);
+    // queries first, on all threads: only the terms they use get indexed. A query holds the
+    // positions of its words at first, and they become ids further down.
+    let qc = line_cuts(qb, nt);
+    let parsed: Vec<(Vec<Q>, Vec<&[u8]>)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|k| {
+            let part = &qb[qc[k]..qc[k + 1]];
+            sc.spawn(move || {
+                let (mut qs, mut words) = (Vec::new(), Vec::new());
+                let mut at = |w: &'static [u8]| { words.push(w); words.len() as u32 - 1 };
+                for line in part.split(|&c| c == b'\n') {
+                    if line.is_empty() { continue; }
+                    if line.starts_with(b"BOOL ") {
+                        let w: Vec<&[u8]> = line[5..].split(|&c| c == b' ').collect();
+                        let mut v = vec![(0u8, at(w[0]))];
+                        for k in (1..w.len()).step_by(2) {
+                            let op = match w[k] { b"AND" => 1, b"OR" => 2, _ => 3 };
+                            v.push((op, at(w[k + 1])));
+                        }
+                        qs.push(Q::Bool(v));
+                    } else {
+                        let w: Vec<&[u8]> = line[8..line.len() - 1].split(|&c| c == b' ').collect();
+                        qs.push(Q::Phrase((w.iter().map(|t| at(t)).collect(), w)));
+                    }
+                }
+                (qs, words)
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let (mut qs, mut words) = (Vec::new(), Vec::new());
+    for (q, w) in parsed {
+        let b = words.len() as u32;
+        for mut x in q {
+            match &mut x { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 += b), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t += b) }
+            qs.push(x);
+        }
+        words.extend(w);
     }
-    cuts.push(docs.len());
+    // word ids, also on all threads: bucket b takes the words of up to 16 bytes whose hash falls
+    // in it, sorts and dedups them; a word's id is its bucket's base plus its rank there.
+    // Longer words are rare and are numbered after, through a map.
+    let bucket = |k: u128| ((hm(k) as u128 * nt as u128) >> 64) as usize;
+    let rank: Vec<AtomicU32> = (0..words.len()).map(|_| AtomicU32::new(0)).collect();
+    let dist: Vec<Vec<u128>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..nt).map(|b| {
+            let (words, rank) = (&words, &rank);
+            sc.spawn(move || {
+                let mut v: Vec<(u128, u32)> = words.iter().enumerate().filter(|e| e.1.len() <= 16).map(|(i, w)| (pack(w, w.len()), i as u32)).filter(|e| bucket(e.0) == b).collect();
+                v.sort_unstable();
+                let mut d: Vec<u128> = Vec::new();
+                for (k, i) in v {
+                    if d.last() != Some(&k) { d.push(k); }
+                    rank[i as usize].store((b as u32) << 24 | (d.len() as u32 - 1), Ordering::Relaxed);
+                }
+                d
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut base = vec![0u32; nt + 1];
+    for b in 0..nt { base[b + 1] = base[b] + dist[b].len() as u32; }
+    let mut long: HashMap<&[u8], u32> = HashMap::new();
+    let ids: Vec<u32> = words.iter().zip(&rank).map(|(w, r)| {
+        let r = r.load(Ordering::Relaxed);
+        if w.len() <= 16 { return base[(r >> 24) as usize] + (r & 0xFF_FFFF); }
+        let n = base[nt] + long.len() as u32;
+        *long.entry(*w).or_insert(n)
+    }).collect();
+    let nall = base[nt] as usize + long.len();
+    let all = || dist.iter().zip(&base).flat_map(|(d, &b)| d.iter().enumerate().map(move |(r, &k)| (k, b + r as u32)));
+    // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
+    // slot holds the whole token and its value and a lookup is one access
+    let mut short = Probe::<2>::new(all().filter(|e| e.0 >> 64 == 0));
+    let mut longer = Probe::<4>::new(all().filter(|e| e.0 >> 64 != 0));
+    drop((dist, rank));
+    let docs = map(&format!("{data}/docs.txt"));
+    let cuts = line_cuts(docs, nt);
     let mut lower = [0u8; 256]; // 0 = separator, else the lowercased byte
     for c in b'a'..=b'z' { lower[c as usize] = c; }
     for c in b'0'..=b'9' { lower[c as usize] = c; }
@@ -180,8 +204,7 @@ fn main() {
                 while lower[docs[i] as usize] != 0 { i += 1; }
                 if i - s0 > 16 { continue; }
                 let kk = pack(&docs[s0..], i - s0);
-                let mut j = h(kk);
-                let t = loop { let x = keys[j]; if x == kk { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); };
+                let t = if i - s0 <= 8 { short.get(kk, short.at(kk)) } else { longer.get(kk, longer.at(kk)) };
                 if let Some(t) = t { if seen[t as usize] != nd0 { seen[t as usize] = nd0; c[t as usize] += 1; } }
             }
         }
@@ -192,20 +215,15 @@ fn main() {
     order.sort_by_key(|&t| std::cmp::Reverse(c[t as usize]));
     let mut new = vec![0u32; nall];
     for (i, &t) in order.iter().enumerate() { new[t as usize] = i as u32; }
-    for j in 0..cap { if keys[j] != 0 { vals[j] = new[vals[j] as usize]; } }
+    short.remap(&new);
+    longer.remap(&new);
     for v in long.values_mut() { *v = new[*v as usize]; }
     for q in qs.iter_mut() {
-        match q { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 = new[e.1 as usize]), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t = new[*t as usize]) }
+        match q { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 = new[ids[e.1 as usize] as usize]), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t = new[ids[*t as usize] as usize]) }
     }
+    drop((words, ids));
+    unsafe { mallopt(-3, 1 << 20) };
     let abits: Vec<std::sync::atomic::AtomicU64> = (0..nd * nw).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
-    // the scan probes `slots`, 16 bytes each: the token's low 8 bytes, then its value and a
-    // tag of its high 8 bytes (0 when it has none). Most tokens are 8 bytes or less, so a
-    // lookup is one access; a longer token checks its high half in `hi`.
-    // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
-    // slot holds the whole token and its value and a lookup is one access
-    let short = Probe::<2>::new(keys.iter().zip(&vals).filter(|e| *e.0 != 0 && *e.0 >> 64 == 0).map(|(&k, &v)| (k, v)));
-    let longer = Probe::<4>::new(keys.iter().zip(&vals).filter(|e| *e.0 >> 64 != 0).map(|(&k, &v)| (k, v)));
-    drop((keys, vals));
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
@@ -464,6 +482,7 @@ impl<const W: usize> Probe<W> {
         unsafe { std::arch::x86_64::_mm_prefetch(self.s.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0) };
         j
     }
+    fn remap(&mut self, new: &[u32]) { for e in self.s.iter_mut().filter(|e| e[0] != 0) { e[W / 2] = new[e[W / 2] as usize] as u64; } }
     fn get(&self, k: u128, mut j: usize) -> Option<u32> {
         loop {
             let e = &self.s[j];
@@ -472,6 +491,18 @@ impl<const W: usize> Probe<W> {
             j = (j + 1) & (self.s.len() - 1);
         }
     }
+}
+
+// thread k's share of b is cuts[k]..cuts[k + 1], cut after a LF
+fn line_cuts(b: &[u8], nt: usize) -> Vec<usize> {
+    let mut cuts = vec![0usize];
+    for k in 1..nt {
+        let mut p = (b.len() * k / nt).max(*cuts.last().unwrap());
+        while p < b.len() && p > 0 && b[p - 1] != b'\n' { p += 1; }
+        cuts.push(p);
+    }
+    cuts.push(b.len());
+    cuts
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
