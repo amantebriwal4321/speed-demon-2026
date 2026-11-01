@@ -120,7 +120,9 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &body[ct[k]..ct[k + 1]];
             sc.spawn(move || {
-                let mut v = vec![Vec::with_capacity(c.len() / 15 / nt + 16); nt];
+                // each bucket sized for its share of the lines up front (vec![v; nt] would clone
+                // the first, and a clone of an empty Vec has no capacity)
+                let mut v: Vec<Vec<u64>> = (0..nt).map(|_| Vec::with_capacity(c.len() / 15 / nt + 16)).collect();
                 let mut big: HashMap<(u32, u32), u32> = HashMap::new();
                 let mut j = 0;
                 while j < c.len() {

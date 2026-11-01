@@ -151,3 +151,6 @@ As in A and C: once a thread has parsed its share of graph.txt it never reads th
 
 ## Round 29: glibc linked statically
 `-C target-feature=+crt-static` in .cargo/config.toml: the binary is static-pie, so a run starts without the dynamic loader mapping libc and resolving its symbols. A trivial program goes from 2.27 to 1.77 ms exec to exit (40 alternating runs); on A, 21 alternating runs 67.8 -> 66.3 ms. Peak memory the same or 1 MB lower. The build image (rust:1-slim-trixie) has libc.a. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 30: every parse bucket sized up front
+strace showed 56 mremap calls in the parse. Each thread made its buckets with `vec![Vec::with_capacity(..); nt]`, which clones the first Vec, and a clone of an empty Vec has no capacity: all but one bucket per thread started empty and grew by doubling, each step past the mmap threshold a mremap, which takes the address-space lock for writing (holding off the other threads' page faults on graph.txt) and flushes the TLB on every core. Each bucket now gets its own Vec::with_capacity. mremap 56 -> 0; 15 alternating runs: 460.6 -> 452.3 ms; peak 78-82 -> 73-78 MB. Exact on s7, s42, t5, full, h99, h3.
