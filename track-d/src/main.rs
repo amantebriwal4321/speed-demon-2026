@@ -185,6 +185,8 @@ fn main() {
                     let mut h = ord.len();
                     ord.push(r as u32);
                     while h < ord.len() {
+                        if let Some(&w) = ord.get(h + 16) { pf(off, w as usize); }
+                        if let Some(&w) = ord.get(h + 8) { pf(adj, off[w as usize] as usize); }
                         let u = ord[h] as usize; h += 1;
                         for e in &adj[off[u] as usize..off[u + 1] as usize] {
                             let v = (e & vm) as usize;

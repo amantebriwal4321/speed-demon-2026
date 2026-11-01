@@ -127,3 +127,6 @@ Board: run-c29392d5df70, 0.2240 s, 89.5 MB, 64.35 points, a new best, rank 37 ->
 
 ## Round 24: prefetch ahead in the relabel
 The newid and relabel passes walk the nodes in BFS order and read the old graph at random: offsets, then the edge list, then newid of every head. The order is known ahead, so each step prefetches (into L2) the offsets 16 nodes ahead and the edge list 8 ahead. Phase times over 13 alternating runs: relabel 49 -> 27 ms, newid 23 -> 20 ms. Tried and dropped: prefetching a node's offsets when the BFS queues it (bfs +3 ms) and look-ahead in the reverse build (+8 ms). End to end, 15 alternating runs: 0.475 -> 0.454 s at 4 threads, 0.528 -> 0.524 s with 12, CPU -3%. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 25: look-ahead in the BFS
+The BFS queue is first in, first out, so the nodes it will expand next are known: each step prefetches the offsets of the node 16 places ahead and the edge list of the node 8 ahead. BFS phase 56 -> 46 ms over 13 alternating runs; end to end 0.431 -> 0.414 s at 4 threads, flat with 12 threads time-sliced on 4 cores. The same look-ahead in the CSR scatter saved 1 ms and was dropped. Exact on s7, s42, t5, full, h99, h3.
