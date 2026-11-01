@@ -1,24 +1,14 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::hash::Hasher;
 use std::io::Write;
 
-// small FxHash-style hasher, enough for byte strings we own
-#[derive(Default)]
-struct Fx(u64);
-impl Hasher for Fx {
-    fn finish(&self) -> u64 { self.0 }
-    fn write(&mut self, b: &[u8]) {
-        let mut h = self.0;
-        let mut c = b.chunks_exact(8);
-        for x in &mut c { h = (h.rotate_left(5) ^ u64::from_le_bytes(x.try_into().unwrap())).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
-        for &x in c.remainder() { h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
-        self.0 = h;
-    }
-    fn write_u16(&mut self, x: u16) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
-    fn write_usize(&mut self, x: usize) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95); }
+// FxHash-style hash of a byte string, eight bytes at a time
+fn fx(b: &[u8]) -> u64 {
+    let mut h = 0u64;
+    let mut c = b.chunks_exact(8);
+    for x in &mut c { h = (h.rotate_left(5) ^ u64::from_le_bytes(x.try_into().unwrap())).wrapping_mul(0x517cc1b727220a95); }
+    for &x in c.remainder() { h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
+    h
 }
-
-fn fx(b: &[u8]) -> u64 { let mut h = Fx(0); h.write(b); h.finish() }
 
 #[derive(Clone, Copy)]
 struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
@@ -36,13 +26,6 @@ fn find(b: &[u8], c: u8) -> usize {
             if m != 0 { return i + m.trailing_zeros() as usize; }
             i += 16;
         }
-    }
-    let pat = 0x0101010101010101u64 * c as u64;
-    while i + 8 <= b.len() {
-        let x = u64::from_le_bytes(b[i..i + 8].try_into().unwrap()) ^ pat;
-        let z = x.wrapping_sub(0x0101010101010101) & !x & 0x8080808080808080;
-        if z != 0 { return i + (z.trailing_zeros() / 8) as usize; }
-        i += 8;
     }
     i + b[i..].iter().position(|&x| x == c).unwrap()
 }
@@ -204,8 +187,7 @@ fn map(path: &str) -> &'static [u8] {
     let f = std::fs::File::open(path).unwrap();
     let len = f.metadata().unwrap().len() as usize;
     if len == 0 { return &[]; }
-    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
-    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
+    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0), len) }
 }
 
 const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full

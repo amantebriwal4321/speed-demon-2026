@@ -71,3 +71,6 @@ Eight pieces per thread pulled from an atomic counter instead of one fixed slice
 
 ## x86-64-v3 build
 Same target-cpu config as A and D. Exact on s7, s42, t5, full. Local medians about 1-3% faster.
+
+## Round 11: less code
+The Hasher impl became one fx() function, the 8-byte tail of find() went (position() covers it), and the POP mmap switch went. rustfmt lines 373 -> 337. Exact on s7, s42, t5, full; medians the same.

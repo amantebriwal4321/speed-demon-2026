@@ -332,7 +332,7 @@ fn map(path: &str) -> &'static [u8] {
     let f = std::fs::File::open(path).unwrap();
     let len = f.metadata().unwrap().len() as usize;
     if len == 0 { return &[]; }
-    let flags = 2 | if std::env::var("POP").is_ok() { 0x8000 } else { 0 }; // MAP_PRIVATE, MAP_POPULATE
+    let flags = 2; // MAP_PRIVATE
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, flags, f.as_raw_fd(), 0), len) }
 }
 
