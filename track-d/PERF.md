@@ -116,3 +116,6 @@ Board for rounds 19 + 20: run-e8a600cefc0f 0.2331 s (63.85 points, a new best), 
 
 ## Round 21: the number parser inlined
 perf listed `num` as its own function (3.5% of samples): three calls per edge line, 15 million in all, each with a call and spills. `#[inline(always)]`: two sets of 15 alternating runs, 0.611 -> 0.581 s and 0.638 -> 0.597 s, CPU -6%. Exact on s7, s42, t5, full, and on fresh seeds 99 (sample) and 3 (tiny) against the reference.
+
+## Round 22: Radix::fill and Dist::set_at inlined
+Both were marked `#[inline]` but stayed out of line (fill was 8.8% of samples under its own name). `#[inline(always)]` on both: three sets of 15 alternating runs, 0.592 -> 0.548, 0.614 -> 0.593 s at 4 threads and 0.693 -> 0.653 s with 12; CPU -4 to -9%. Exact on s7, s42, t5, full, h99, h3.

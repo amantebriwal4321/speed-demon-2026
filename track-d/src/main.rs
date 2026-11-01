@@ -54,7 +54,7 @@ impl Dist {
         match k as u32 { SPILL => self.big[&v], x => x as u64 }
     }
     // set with the slot already found by slot(v)
-    #[inline]
+    #[inline(always)]
     fn set_at(&mut self, mut i: usize, v: u32, d: u64) {
         if self.t[i] == E {
             if (self.len + 1) * 2 > self.t.len() { self.grow(); i = self.slot(v); }
@@ -373,7 +373,7 @@ impl Radix {
     fn push(&mut self, k: u64, v: u32) { let i = self.idx(k); self.b[i].push((k, v)); self.len += 1; }
     fn len(&self) -> usize { self.len }
     // make bucket 0 (keys equal to last) non-empty, if anything is left
-    #[inline]
+    #[inline(always)]
     fn fill(&mut self) {
         if !self.b[0].is_empty() || self.len == 0 { return; }
         let i = (1..65).find(|&i| !self.b[i].is_empty()).unwrap();
