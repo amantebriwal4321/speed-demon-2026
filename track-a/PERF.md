@@ -83,3 +83,6 @@ The local profile was about a quarter kernel time, including TLB-shootdown IPIs.
 - kept: heaps during the parse, then the 16 KB threshold again before the hours, so the hours' buffers are their own mappings: 0.099 -> 0.075 s (-25%), CPU -12%, peak 18-19 -> 22-23 MB.
 Exact on s7, s42, t5, full, also with 12 threads.
 Reverted (round 20): board run-8b01065c2da1 gave 0.0366 s but 27.9 MB, against 21-22 MB. The board backs heap memory with 2 MB pages (locally with THP `always` the peak goes 18-20 -> 24 MB), and the time gain did not show beyond the run-to-run spread.
+
+## Round 21: percentiles by selection
+Phase timers: the hour phase is 31 ms of 71 locally, and perf puts the group sorts at 12% of all CPU. Only three ranks of each group are printed, so p99 is selected first (select_nth_unstable), then p95 among the rows below it, then p50 below that, instead of sorting the group. 21 alternating runs: 0.074 -> 0.072 s at 4 threads, 0.105 -> 0.099 s with 12; CPU -5 to -9%. Exact on s7, s42, t5, full.

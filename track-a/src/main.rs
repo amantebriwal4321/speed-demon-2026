@@ -188,9 +188,13 @@ fn main() {
                         let grp = &mut buf[s..t];
                         let n = grp.len();
                         let errs = std::mem::take(&mut errv[g]);
-                        // nearest rank percentiles; groups average about 25 rows, so a plain sort
-                        grp.sort_unstable();
-                        let pc = |p: usize| grp[(p * n + 99) / 100 - 1] as u64;
+                        // nearest rank percentiles: p99 is selected first, then p95 and p50 among
+                        // the rows below it, which costs less than sorting the group
+                        let k = |p: usize| (p * n + 99) / 100 - 1;
+                        grp.select_nth_unstable(k(99));
+                        if k(95) < k(99) { grp[..k(99)].select_nth_unstable(k(95)); }
+                        if k(50) < k(95) { grp[..k(95)].select_nth_unstable(k(50)); }
+                        let pc = |p: usize| grp[k(p)] as u64;
                         o.extend_from_slice(&hdr);
                         o.extend_from_slice(all[g]);
                         for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
