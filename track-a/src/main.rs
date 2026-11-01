@@ -227,12 +227,13 @@ fn main() {
                         let grp = &mut buf[s..t];
                         let n = grp.len();
                         let errs = std::mem::take(&mut errv[g]);
-                        // nearest rank percentiles: p99 is selected first, then p95 and p50 among
-                        // the rows below it, which costs less than sorting the group
+                        // nearest rank percentiles: p50 is selected first, then p95 among the rows
+                        // above it and p99 among the rows above that, about 1.55 n compares in all
+                        // (p99 first and the others below it went over nearly all rows three times)
                         let k = |p: usize| (p * n + 99) / 100 - 1;
-                        grp.select_nth_unstable(k(99));
-                        if k(95) < k(99) { grp[..k(99)].select_nth_unstable(k(95)); }
-                        if k(50) < k(95) { grp[..k(95)].select_nth_unstable(k(50)); }
+                        grp.select_nth_unstable(k(50));
+                        if k(95) > k(50) { grp[k(50) + 1..].select_nth_unstable(k(95) - k(50) - 1); }
+                        if k(99) > k(95) { grp[k(95) + 1..].select_nth_unstable(k(99) - k(95) - 1); }
                         let pc = |p: usize| grp[k(p)] as u64;
                         line(&mut o, &hdr, all[g], [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64]);
                     }

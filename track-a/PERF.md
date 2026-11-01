@@ -123,3 +123,6 @@ C's round 24 on A: once a thread has parsed its share of the log it never reads 
 - A thread's region of each hour is looked up from a 72-entry array made once, instead of computed with a multiply on every line.
 s7: 134.5M -> 131.9M instructions; 31 alternating runs: 60.0 -> 59.2 ms. Exact on s7, s42, t5, full, h99, h3.
 Reverted (round 31): on the board round 30 ran 0.0292, 0.0261, 0.0336, 0.0298 and 0.0335 s, against six runs of round 29 between 0.0260 and 0.0269 s, while the other tracks' times in the same runs stayed put. The likely cause is the gather buffer: cleared, it was streamed into cache before the scatter's random writes; left as it was, those writes miss. Back to round 29.
+
+## Round 32: p50 selected first
+A group's percentiles came from three selections: p99 on the group, then p95 among the rows below it, then p50 among the rows below that. Each of those ran over nearly the whole group (99% and 95% of it), so about 2.9 n compares. Now p50 is selected first, then p95 among the rows above it (half the group) and p99 among the rows above that (5%): about 1.55 n, the same values. Groups over 128 rows hold 55% of the rows, so the selections are mostly long ones. THP `always`, 31 alternating runs: 57.1 -> 55.7 ms and 57.7 -> 55.3 ms at 4 threads, 70.0 -> 67.6 ms with 12 forced. Exact on s7, s42, t5, full, h99, h3.
