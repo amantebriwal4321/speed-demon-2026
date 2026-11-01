@@ -98,3 +98,6 @@ S is scored against the reference's 91 lines at exponent 0.15, so dead code cost
 Removed the disabled phrase-pair table and its scan branch, and the tokenizing phrase check:
 phrases now keep their words as byte slices and every phrase goes through the text scan, long
 words included. rustfmt'd code lines 943 -> 827. Exact on s7, s42, t5, full; medians unchanged.
+
+## Round 13: std HashMap
+The term maps are only used while reading queries and for tokens over 16 bytes, so the custom Fx hasher went. rustfmt lines 827 -> 800. Exact on s7, s42, t5, full; medians 0.303 vs 0.299 s.

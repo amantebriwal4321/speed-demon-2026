@@ -1,22 +1,8 @@
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[derive(Default)]
-struct Fx(u64);
-impl Hasher for Fx {
-    fn finish(&self) -> u64 { self.0.rotate_left(26) } // the multiply leaves entropy in the high bits; hashbrown indexes with the low ones
-    fn write(&mut self, b: &[u8]) {
-        let mut h = self.0;
-        let mut c = b.chunks_exact(8);
-        for x in &mut c { h = (h.rotate_left(5) ^ u64::from_le_bytes(x.try_into().unwrap())).wrapping_mul(0x517cc1b727220a95); }
-        for &x in c.remainder() { h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
-        self.0 = h;
-    }
-    fn write_usize(&mut self, x: usize) { self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
-}
-type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+type FxMap<K, V> = HashMap<K, V>;
 
 
 
@@ -121,7 +107,7 @@ fn main() {
     let qb = map(&format!("{data}/queries.txt"));
 
     // queries first: only the terms they use get indexed
-    let mut ids: FxMap<&[u8], u32> = FxMap::default();
+    let mut ids: FxMap<&[u8], u32> = HashMap::new();
     let mut qs = Vec::new();
     for line in qb.split(|&c| c == b'\n') {
         if line.is_empty() { continue; }
@@ -148,7 +134,7 @@ fn main() {
     let mut keys = vec![0u128; cap];
     let mut vals = vec![0u32; cap];
     let h = |k: u128| (((k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F)) >> (shift - 64)) as usize;
-    let mut long: FxMap<&[u8], u32> = FxMap::default();
+    let mut long: FxMap<&[u8], u32> = HashMap::new();
     let hm = |k: u128| (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     for (t, &id) in &ids {
         if t.len() > 16 { long.insert(t, id); continue; }
