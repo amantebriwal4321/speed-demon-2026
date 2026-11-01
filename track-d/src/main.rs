@@ -34,7 +34,7 @@ const SPILL: u32 = u32::MAX - 1;
 struct Dist { t: Vec<u64>, len: usize, big: std::collections::HashMap<u32, u64> }
 const E: u64 = u64::MAX;
 impl Dist {
-    fn new(_n: usize) -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default() } }
+    fn new() -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default() } }
     #[inline]
     fn slot(&self, v: u32) -> usize {
         let m = self.t.len() - 1;
@@ -51,8 +51,6 @@ impl Dist {
         if k == E { return u64::MAX; }
         match k as u32 { SPILL => self.big[&v], x => x as u64 }
     }
-    #[inline]
-    fn set(&mut self, v: u32, d: u64) { let i = self.slot(v); self.set_at(i, v, d) }
     // set with the slot already found by slot(v)
     #[inline]
     fn set_at(&mut self, mut i: usize, v: u32, d: u64) {
@@ -266,7 +264,7 @@ fn main() {
         for _ in 0..nt {
             sc.spawn(|| {
                 // bidirectional Dijkstra: side 0 runs forward from s, side 1 backward from t
-                let mut dist = [Dist::new(n), Dist::new(n)];
+                let mut dist = [Dist::new(), Dist::new()];
                 let mut heap = [Radix::new(), Radix::new()];
                 let g = [(&off, &adj), (&roff, &radj)];
                 loop {
@@ -276,7 +274,7 @@ fn main() {
                     let mut best = u64::MAX;
                     if s == t { best = 0; } else {
                         for (side, x) in [(0, s), (1, t)] {
-                            dist[side].set(x, 0); heap[side].push(0, x);
+                            let i = dist[side].slot(x); dist[side].set_at(i, x, 0); heap[side].push(0, x);
                         }
                         loop {
                             let tf = heap[0].min();

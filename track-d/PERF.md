@@ -72,3 +72,6 @@ just before. Exact on s7, s42, t5, full. Local medians 0.2222 s -> 0.2183 s (-1.
 ## Round 10: drop the unused touched lists
 The per-query touched lists were filled but never read (clear() refills the whole table).
 Removed: exact on s7, s42, t5, full; medians 0.2075 s vs 0.2068 s, a few lines less code.
+
+## Round 11: less code
+Dist::set and the unused new() argument went; the POP switch went. rustfmt lines 515 -> 501. Exact on s7, s42, t5, full. (Dropping the BFS relabel instead would cut ~40 lines but costs +48% time: 0.203 -> 0.301 s.)
