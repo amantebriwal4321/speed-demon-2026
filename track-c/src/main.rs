@@ -129,18 +129,18 @@ fn main() {
                 let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
                 while i < hi {
                     if c[i..].starts_with(BOM) { i += 3; }
-                    let mut id = 0i64;
-                    while c[i] != b',' { id = id * 10 + (c[i] - b'0') as i64; i += 1; }
+                    let id = dig(c, &mut i) as i64;
                     i += 1;
                     let (ns, ne, nl) = field(c, &mut i);
                     let (_, _, tl) = field(c, &mut i);
-                    let mut rid = 0usize;
-                    while c[i] != b',' { rid = rid * 10 + (c[i] - b'0') as usize; i += 1; }
+                    let rid = dig(c, &mut i) as usize;
                     i += 1;
                     let neg = c[i] == b'-';
                     if neg { i += 1; }
-                    let mut a = 0i64;
-                    while c[i] != b'\r' && c[i] != b'\n' { if c[i] != b'.' { a = a * 10 + (c[i] - b'0') as i64; } i += 1; }
+                    // amount is digits, a dot, then exactly two digits
+                    let mut a = dig(c, &mut i) as i64;
+                    a = a * 100 + ((c[i + 1] - b'0') * 10 + (c[i + 2] - b'0')) as i64;
+                    i += 3;
                     if c[i] == b'\r' { i += 1; }
                     i += 1;
                     if neg { a = -a; }
@@ -220,4 +220,27 @@ fn insert(table: &[AtomicU64], seen: &[AtomicU64], g: usize, me: u64, mut j: usi
         j = (j + 1) & (SLOTS - 1);
     }
     seen[g * WORDS + j / 64].fetch_or(1 << (j % 64), Relaxed);
+}
+
+// the digits at b[*i..], leaving *i on the first non digit: 8 bytes at once with SWAR, the
+// byte loop for longer numbers and near the end of the file
+#[inline]
+fn dig(b: &[u8], i: &mut usize) -> u64 {
+    if *i + 8 <= b.len() {
+        let x = u64::from_le_bytes(b[*i..*i + 8].try_into().unwrap());
+        let d = x.wrapping_sub(0x3030303030303030);
+        let stop = (d | d.wrapping_add(0x7676767676767676)) & 0x8080808080808080;
+        if stop != 0 {
+            let n = (stop.trailing_zeros() / 8) as usize;
+            if n == 0 { return 0; }
+            let x = (d << (8 * (8 - n))) & 0x0F0F0F0F0F0F0F0F;
+            let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
+            let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
+            *i += n;
+            return (x * 10000 + (x >> 32)) & 0xFFFFFFFF;
+        }
+    }
+    let mut v = 0u64;
+    while *i < b.len() && b[*i].is_ascii_digit() { v = v * 10 + (b[*i] - b'0') as u64; *i += 1; }
+    v
 }

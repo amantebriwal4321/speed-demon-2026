@@ -57,6 +57,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 - Giving each thread its own countries would make the seen bitsets private. As an upper bound I swapped the atomic OR for a plain load and store, which is wrong but free. It was only 2 to 3% faster locally. Splitting the countries across threads would need a second pass or a 13 MB record buffer, which costs more than that, so it stays as it is.
 
+## Round 9
+
+- id, region_id and the amount are read with an 8 byte SWAR digit parser instead of a byte loop. The amount is digits, a dot and exactly two digits, so its cents are read directly. Local medians over 25 alternating runs went from 0.069 to 0.062 s and from 0.064 to 0.059 s.
+
 ## Next ideas
 
 The per country bitsets of names seen are the next cost: one atomic OR per record into 8 MB.
