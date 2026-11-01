@@ -124,3 +124,8 @@ Profiled on 4 cores (perf, software clock): the scan was 55% of CPU, and knockin
 - A term's last doc and list length sit side by side in one `[u32; 2]`.
 - Common-term words between a thread's first and last word hold only its docs, so they are written with a plain store; only the first and last words use `fetch_or`.
 Exact on s7, s42, t5, full. Paired, 11 alternating runs: 0.625 -> 0.579 s (-7%), CPU 2.20 -> 2.00 s, cgroup peak 79 -> 80 MB. rustfmt lines 857 -> 866.
+
+## Round 20: phrases anchored on their rarest word
+214,226 candidate docs went through the phrase check, 19,332 matched, and it scanned 438 MB of doc text looking for the first byte of the phrase's first word (often `t`, `a` or `o`), calling the matcher at each hit. The check now looks for the first two bytes of the phrase word with the shortest doc list (ties: the longest word), case folded, 32 bytes a step with AVX2, then matches the words after it forward and the words before it backward, all as whole tokens. Paired, 11 alternating runs: 0.574 -> 0.494 s (-14%).
+The count and sum of a big BOOL answer came from 8 byte-table lookups per bitset word, in a loop whose counter the compiler kept on the stack. Bit k of a position is set exactly on the positions in a fixed mask, so a word's positions sum to six masked popcounts shifted by k. 0.532 -> 0.514 s (-3%), CPU -5%.
+Exact on s7, s42, t5, full. Both together against round 19: 0.609 -> 0.566 s in one paired set of 11 (the box is noisy), peak 80 MB. rustfmt lines 866 -> 901.

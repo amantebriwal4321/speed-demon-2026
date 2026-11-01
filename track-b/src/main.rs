@@ -336,7 +336,6 @@ fn main() {
     let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
     let tlen = |t: usize| if bslot[t] != u32::MAX { 4 * nw } else { parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>() };
     let bs = |t: u32| { let i = bslot[t as usize]; (i != u32::MAX).then(|| &bits[i as usize * nw..(i as usize + 1) * nw]) };
-    let psum: Vec<u64> = (0..256u32).map(|b| (0..8).filter(|i| b >> i & 1 == 1).sum::<u32>() as u64).collect();
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
@@ -380,13 +379,15 @@ fn main() {
                             _ => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
                         }
                     }
-                    // count and sum word by word (a byte table gives the sum of bit positions);
-                    // only the first ten ids are pulled out one by one
-                    for (w, x) in acc.iter_mut().enumerate() {
-                        let mut b = std::mem::take(x);
+                    // count and sum word by word: bit k of a position is set on the positions
+                    // in mask k, so the positions of a word sum to the popcounts under the masks
+                    // shifted by k; only the first ten ids are pulled out one by one
+                    const M: [u64; 6] = [0xAAAA_AAAA_AAAA_AAAA, 0xCCCC_CCCC_CCCC_CCCC, 0xF0F0_F0F0_F0F0_F0F0, 0xFF00_FF00_FF00_FF00, 0xFFFF_0000_FFFF_0000, 0xFFFF_FFFF_0000_0000];
+                    for w in 0..nw {
+                        let mut b = std::mem::take(&mut acc[w]);
                         if b == 0 { continue; }
                         cnt += b.count_ones() as usize;
-                        sum += b.count_ones() as u64 * (w as u64 * 64) + (0..8).map(|j| psum[(b >> (8 * j)) as u8 as usize] + 8 * j as u64 * ((b >> (8 * j)) as u8).count_ones() as u64).sum::<u64>();
+                        sum += (b.count_ones() as usize * w * 64) as u64 + (0..6).map(|k| ((b & M[k]).count_ones() as u64) << k).sum::<u64>();
                         while b != 0 && r.len() < 10 { r.push((w * 64) as u32 + b.trailing_zeros()); b &= b - 1; }
                     }
                 }
@@ -400,6 +401,7 @@ fn main() {
                             add(&mut cnt, &mut sum, &mut r, &x, p.lo);
                         }
                         Q::Phrase((ts, ks)) => {
+                            let anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
                             // docs holding every term, then the doc text decides
                             let mut order: Vec<u32> = ts.clone(); order.sort_unstable(); order.dedup();
                             let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| bslot[t as usize] != u32::MAX);
@@ -409,7 +411,7 @@ fn main() {
                             };
                             for &t in ld.iter().skip(1) { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
                             if !ld.is_empty() { hit.retain(|&x| { let d = p.lo + x as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }); }
-                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, &lower)); }
+                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, anchor, &lower)); }
                             add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
                         }
                     }
@@ -454,33 +456,48 @@ fn put(b: &mut Vec<u16>, t: u32) {
     if t < 0xFFFE { b.push(t as u16) } else { b.extend_from_slice(&[0xFFFE, (t >> 16) as u16, t as u16]) }
 }
 
-// phrase check on the doc text: find the first word's first byte 16 at a time (case folded),
-// then match the words exactly as whole tokens through the lowercase table
-fn has2(docs: &[u8], start: usize, ks: &[&[u8]], lower: &[u8; 256]) -> bool {
+// phrase check on the doc text: find where word a (the rarest) could start by its first two
+// bytes, case folded, 32 at a time; then match the words after it forward and the words before
+// it backward, all as whole tokens through the lowercase table
+fn has2(docs: &[u8], start: usize, ks: &[&[u8]], a: usize, lower: &[u8; 256]) -> bool {
     use std::arch::x86_64::*;
-    let w0 = ks[0];
     let at = |j: usize| -> bool {
+        let mut e = j;
+        for w in ks[..a].iter().rev() {
+            let mut q = e - 1;
+            while lower[docs[q] as usize] == 0 { if docs[q] == b'\t' { return false; } q -= 1; }
+            if q < start + w.len() { return false; }
+            let s = q + 1 - w.len();
+            if lower[docs[s - 1] as usize] != 0 || (0..w.len()).any(|m| lower[docs[s + m] as usize] != w[m]) { return false; }
+            e = s;
+        }
         let mut j = j;
-        for (n, &k) in ks.iter().enumerate() {
-            let (w, l) = (k, k.len());
-            for m in 0..l { if lower[docs[j + m] as usize] != w[m] { return false; } }
-            j += l;
-            if lower[docs[j] as usize] != 0 { return false; }
-            if n + 1 < ks.len() { while lower[docs[j] as usize] == 0 { if docs[j] == b'\n' { return false; } j += 1; } }
+        for (n, w) in ks[a..].iter().enumerate() {
+            if (0..w.len()).any(|m| lower[docs[j + m] as usize] != w[m]) || lower[docs[j + w.len()] as usize] != 0 { return false; }
+            j += w.len();
+            if a + n + 1 < ks.len() { while lower[docs[j] as usize] == 0 { if docs[j] == b'\n' { return false; } j += 1; } }
         }
         true
     };
+    let w = ks[a];
+    let (c0, c1) = (w[0], if w.len() > 1 { w[1] } else { 0 });
+    // c1 == 0 matches any second byte, for a one-byte word
+    let hit = |j: usize| docs[j] | 0x20 == c0 && (c1 == 0 || docs[j + 1] | 0x20 == c1) && lower[docs[j - 1] as usize] == 0 && at(j);
     let mut i = start + 1;
     unsafe {
-        let (f, lf, fold) = (_mm_set1_epi8(w0[0] as i8), _mm_set1_epi8(b'\n' as i8), _mm_set1_epi8(0x20));
+        let (f0, f1, lf, fold) = (_mm256_set1_epi8(c0 as i8), _mm256_set1_epi8(c1 as i8), _mm256_set1_epi8(b'\n' as i8), _mm256_set1_epi8(0x20));
         loop {
-            if i + 16 > docs.len() {
-                while i < docs.len() && docs[i] != b'\n' { if docs[i] | 0x20 == w0[0] && lower[docs[i - 1] as usize] == 0 && at(i) { return true; } i += 1; }
+            if i + 33 > docs.len() {
+                while i < docs.len() && docs[i] != b'\n' { if hit(i) { return true; } i += 1; }
                 return false;
             }
-            let x = _mm_loadu_si128(docs.as_ptr().add(i) as *const __m128i);
-            let mut m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_or_si128(x, fold), f)) as u32;
-            let e = _mm_movemask_epi8(_mm_cmpeq_epi8(x, lf)) as u32;
+            let x = _mm256_loadu_si256(docs.as_ptr().add(i) as *const __m256i);
+            let mut m = _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_or_si256(x, fold), f0)) as u32;
+            if c1 != 0 {
+                let y = _mm256_loadu_si256(docs.as_ptr().add(i + 1) as *const __m256i);
+                m &= _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_or_si256(y, fold), f1)) as u32;
+            }
+            let e = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, lf)) as u32;
             if e != 0 { m &= (1 << e.trailing_zeros()) - 1; }
             while m != 0 {
                 let j = i + m.trailing_zeros() as usize;
@@ -488,7 +505,7 @@ fn has2(docs: &[u8], start: usize, ks: &[&[u8]], lower: &[u8; 256]) -> bool {
                 if lower[docs[j - 1] as usize] == 0 && at(j) { return true; }
             }
             if e != 0 { return false; }
-            i += 16;
+            i += 32;
         }
     }
 }
