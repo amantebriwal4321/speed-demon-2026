@@ -12,6 +12,11 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 5 | tried a name arena (run-54f93b57d220, 0.097 s but 44 MB, 59.64 points), reverted | run-d49a0459162a | 0.098 | 20 | 63.09 |
 | 6 | SSE2 quote and comma scan, 16 bytes per step | run-5e77f9bfa29a | 0.090 | 20 | 63.96 |
 | 7 | names told apart by a 64 bit hash, no compare against the file | run-a90ced93ea29 | 0.080 | 20 | 65.03 |
+| 8 | rounds 8-11: prefetch one record ahead, SWAR numbers, less code | run-cb3b4ce0f8e0 | 0.058 | 13 | 70.70 |
+| 9 | round 13: region codes become ranks in place | run-2c942fe50715 | 0.059 | 11 | 71.16 |
+| 10 | rounds 15-16: region lookup as a rank query, seen bit read before the OR | run-9e2e34661d58 | 0.054 | 9 | 72.78 |
+| 11 | round 17: SWAR region ids, inline BOM test | run-0f63d861248c | 0.050 | 10 | 73.66 |
+| 12 | round 18: field() inlined | run-28ba62db2b47 | 0.047 | 9 | 74.30 |
 
 ## Step 1: why it got faster
 

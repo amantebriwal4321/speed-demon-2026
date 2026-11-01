@@ -11,6 +11,12 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 4 | CSR built per node range bucket, no atomics | run-093e22eb3b78 | 0.277 | 314 | 57.96 |
 | 5 | per query distances in a small open addressing table instead of a dense array per thread | run-5205ad48a187 | 0.307 | 172 | 59.08 |
 | 6 | hash slot is one u64 (node, dist), so a probe is one load | run-9ecfb196b1c8 | 0.304 | 177 | 59.12 |
+| 7 | rounds 7-16: radix heaps, BFS relabel on all threads, 4-byte edges | run-1af27b829c3b | 0.236 | 107 | 63.12 |
+| 8 | round 17: query tables given back, used-slot cap | run-c3e3ece89411 | 0.235 | 91 | 63.78 |
+| 9 | rounds 19-20: no stale check, 1K-slot tables | run-e8a600cefc0f | 0.233 | 92 | 63.85 |
+| 10 | rounds 21-22: number parser, radix fill and set_at inlined | run-83d7b5a8003b | 0.230 | 92 | 63.97 |
+| 11 | round 23: pushes prefetch the node offsets | run-c29392d5df70 | 0.224 | 90 | 64.35 |
+| 12 | rounds 24-25: look-ahead prefetch in the relabel and the BFS | run-d3a4cf6ff601 | 0.220 | 87 | 64.52 |
 
 ## Step 1: why it got faster
 

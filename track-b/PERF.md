@@ -10,6 +10,11 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 3 | doc lists by counting sort over the stream, SSE2 tokenizer, better hash mixing, only count, sum and top 10 kept per query | run-fd411d459da0 | 0.417 | 289 | 56.88 |
 | 4 | u16 token stream: phrase terms get the low ids, other query terms go to a per doc presence list | run-9a693a205195 | 0.428 | 213 | 57.35 |
 | 5 | BOOL on bitsets: ready made bitsets for terms in more than 1 doc in 32, a scratch bitset for the rest | run-3672a75d2a36 | 0.365 | 229 | 58.03 |
+| 6 | rounds 6-18: dense terms straight into bitsets, u16 part-local lists, 8-byte probe slots | run-9b9f8c901f87 | 0.308 | 96 | 62.82 |
+| 7 | round 20: phrase check anchored on the rarest word, popcount sums | run-96a07446a51b | 0.249 | 97 | 64.94 |
+| 8 | round 29: the fill in two waves | run-abf05797d461 | 0.243 | 76 | 66.05 |
+| 9 | rounds 30-32: common-term cutoff 1 in 24 (and waves) | run-14c0632534ec | 0.251 | 67 | 66.25 |
+| 10 | round 32 again (two waves, cutoff 1 in 24) | run-ff5ca3c4b651 | 0.245 | 70 | 66.34 |
 
 ## Step 1: why it got faster
 

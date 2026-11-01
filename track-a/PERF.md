@@ -10,6 +10,8 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 3 | per hour flat u64 rows (endpoint, latency, 5xx bit) and one plain sort per hour instead of 132k small vectors | run-17ee990429f8 | 0.067 | 52 | 68.86 |
 | 4 | free each hour's rows as soon as that hour is written | run-88f1b4564bd4 | 0.065 | 34 | 70.85 |
 | 5 | pread into a reused 512 KB buffer per thread instead of the mmap, so no page faults | run-f70f5f3b9d4b | 0.061 | 39 | 70.96 |
+| 6 | rounds 6-17 (see below): hours in parallel, written in order, SWAR fields | run-3ca301542316 | 0.0366 | 21 | 77.46 |
+| 7 | rounds 18-21: endpoint text in a per-thread copy, percentiles by selection | run-d9f8db937084 | 0.0360 | 22 | 77.49 |
 
 ## Step 1: why it got faster
 
