@@ -138,7 +138,7 @@ fn main() {
     // in it, sorts and dedups them; a word's id is its bucket's base plus its rank there.
     // Longer words are rare and are numbered after, through a map.
     let bucket = |k: u128| ((hm(k) as u128 * nt as u128) >> 64) as usize;
-    let rank: Vec<AtomicU32> = (0..words.len()).map(|_| AtomicU32::new(0)).collect();
+    let rank: Vec<AtomicU32> = zeroed(words.len());
     let dist: Vec<Vec<u128>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|b| {
             let (words, rank) = (&words, &rank);
@@ -223,7 +223,7 @@ fn main() {
     }
     drop((words, ids));
     unsafe { mallopt(-3, 1 << 20) };
-    let abits: Vec<std::sync::atomic::AtomicU64> = (0..nd * nw).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+    let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
@@ -503,6 +503,13 @@ fn line_cuts(b: &[u8], nt: usize) -> Vec<usize> {
     }
     cuts.push(b.len());
     cuts
+}
+
+// n zeroed atomics straight from calloc: the kernel hands out zero pages, so nothing is
+// written up front on one thread, and the pages fault in on the threads that use them
+fn zeroed<T>(n: usize) -> Vec<T> {
+    let l = std::alloc::Layout::array::<T>(n.max(1)).unwrap();
+    unsafe { Vec::from_raw_parts(std::alloc::alloc_zeroed(l) as *mut T, n, n.max(1)) }
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap

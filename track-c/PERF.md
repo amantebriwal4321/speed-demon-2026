@@ -87,3 +87,6 @@ Reverted in round 13: a third board sample, run-7073cb070c9d at 0.0601 s, matche
 
 ## Round 13: region codes become ranks in place
 The region table held codes in one 2 MB array and ranks in a second one, both alive to the end. The ranks now overwrite the codes in place. With 12 threads forced, the cgroup peak goes from 10 to 8 MB. Exact on s7, s42, t5, full.
+
+## Round 14: zeroed tables from calloc
+The name table and the seen bits (5 MB) were filled with zeros on the main thread before the parse; they now come from `alloc_zeroed`, so the kernel's zero pages fault in on the threads that use them. 21 alternating runs: -1% at 4 threads, -3% with 12 threads forced. Exact on s7, s42, t5, full; peak 8 MB both.
