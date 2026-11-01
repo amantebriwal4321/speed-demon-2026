@@ -7,27 +7,27 @@ type FxMap<K, V> = HashMap<K, V>;
 
 
 // only the count, the sum and the first ten ids are printed
-fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u32]) {
+fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u16], lo: u32) {
     *cnt += x.len();
-    *sum += x.iter().map(|&d| d as u64).sum::<u64>();
-    for &d in x.iter().take(10 - r.len()) { r.push(d); }
+    *sum += x.iter().map(|&d| d as u64).sum::<u64>() + lo as u64 * x.len() as u64;
+    for &d in x.iter().take(10 - r.len()) { r.push(lo + d as u32); }
 }
 
 const BLK: usize = 1 << 21; // u16 entries per block, each block sized up front so it never grows
 
-struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, doff: Vec<u32> }
+struct Part { lo: u32, lists: Vec<u16>, loff: Vec<u32>, doff: Vec<u32> }
 
 enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<&'static [u8]>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
 
 // does sorted b contain x, searching forward from *j (galloping); moves *j along
-fn seek(b: &[u32], j: &mut usize, x: u32) -> bool {
+fn seek(b: &[u16], j: &mut usize, x: u16) -> bool {
     let mut step = 1;
     while *j + step < b.len() && b[*j + step] < x { *j += step; step *= 2; }
     let hi = (*j + step + 1).min(b.len());
     *j += b[*j..hi].partition_point(|&y| y < x);
     *j < b.len() && b[*j] == x
 }
-fn and(a: &[u32], b: &[u32]) -> Vec<u32> {
+fn and(a: &[u16], b: &[u16]) -> Vec<u16> {
     let (a, b) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     if a.len() * 8 < b.len() {
         let mut j = 0;
@@ -39,7 +39,7 @@ fn and(a: &[u32], b: &[u32]) -> Vec<u32> {
     }
     o
 }
-fn or(a: &[u32], b: &[u32]) -> Vec<u32> {
+fn or(a: &[u16], b: &[u16]) -> Vec<u16> {
     let (mut i, mut j, mut o) = (0, 0, Vec::with_capacity(a.len() + b.len()));
     while i < a.len() && j < b.len() {
         if a[i] < b[j] { o.push(a[i]); i += 1 } else if a[i] > b[j] { o.push(b[j]); j += 1 } else { o.push(a[i]); i += 1; j += 1; }
@@ -47,7 +47,7 @@ fn or(a: &[u32], b: &[u32]) -> Vec<u32> {
     o.extend_from_slice(&a[i..]); o.extend_from_slice(&b[j..]);
     o
 }
-fn not(a: &[u32], b: &[u32]) -> Vec<u32> {
+fn not(a: &[u16], b: &[u16]) -> Vec<u16> {
     let mut j = 0;
     a.iter().copied().filter(|&x| !seek(b, &mut j, x)).collect()
 }
@@ -198,7 +198,7 @@ fn main() {
     // marks it without touching last[] or a side table
     for j in 0..cap { if keys[j] != 0 && bslot[vals[j] as usize] != u32::MAX { vals[j] = 1 << 31 | bslot[vals[j] as usize]; } }
     for v in long.values_mut() { if bslot[*v as usize] != u32::MAX { *v = 1 << 31 | bslot[*v as usize]; } }
-    let scan: Vec<(Part, Vec<Vec<u16>>, Vec<u32>)> = std::thread::scope(|sc| {
+    let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
@@ -210,9 +210,17 @@ fn main() {
                 let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
                 let (mut acc, mut aw) = (vec![0u64; nd], 0usize);
                 let mut i = 0;
+                // lists hold doc ids local to their part as u16, so a part closes at 65,536 docs
+                let mut done = Vec::new();
                 while i < c.len() {
                     let mut doc = 0u32;
                     while c[i] != b'\t' { doc = doc * 10 + (c[i] - b'0') as u32; i += 1; }
+                    if p.doff.len() == 1 << 16 {
+                        blocks.push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
+                        let q = std::mem::replace(&mut p, Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() });
+                        done.push((q, std::mem::take(&mut blocks), std::mem::replace(&mut cnt, vec![0u32; nall + 1])));
+                        last.fill(u32::MAX);
+                    }
                     if p.lo == u32::MAX { p.lo = doc; }
                     // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
                     // the fill below can free each block as it goes and the peak stays low
@@ -268,7 +276,8 @@ fn main() {
                 }
                 for (x, a) in acc.iter_mut().enumerate() { if *a != 0 { abits[x * nw + aw].fetch_or(*a, Ordering::Relaxed); } }
                 blocks.push(blk);
-                (p, blocks, cnt)
+                done.push((p, blocks, cnt));
+                done
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
@@ -276,12 +285,12 @@ fn main() {
     // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
     // which leaves out nearly half the postings
     let parts: Vec<Part> = std::thread::scope(|sc| {
-        let hs: Vec<_> = scan.into_iter().map(|(mut p, blocks, mut cnt)| {
+        let hs: Vec<_> = scan.into_iter().flatten().map(|(mut p, blocks, mut cnt)| {
             sc.spawn(move || {
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut cur = cnt.clone();
-                let mut lists = vec![0u32; cnt[nall] as usize];
-                let mut d = p.lo.wrapping_sub(1);
+                let mut lists = vec![0u16; cnt[nall] as usize];
+                let mut d = u16::MAX;
                 for b in blocks {
                     let mut q = 0;
                     while q < b.len() {
@@ -299,7 +308,7 @@ fn main() {
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
-    fn dl(p: &Part, t: u32) -> &[u32] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
+    fn dl(p: &Part, t: u32) -> &[u16] { &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize] }
 
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
     // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
@@ -329,7 +338,7 @@ fn main() {
                     let Q::Bool(v) = &qs[k] else { unreachable!() };
                     match bs(v[0].1) {
                         Some(b) => acc.copy_from_slice(b),
-                        None => for p in &parts { for &d in dl(p, v[0].1) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                        None => for p in &parts { for d in dl(p, v[0].1).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
                     }
                     for &(op, t) in &v[1..] {
                         if let Some(b) = bs(t) {
@@ -342,12 +351,12 @@ fn main() {
                         }
                         match op {
                             1 => {
-                                for p in &parts { for &d in dl(p, t) { if acc[d as usize >> 6] >> (d & 63) & 1 == 1 { tmp[d as usize >> 6] |= 1 << (d & 63); } } }
+                                for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { if acc[d as usize >> 6] >> (d & 63) & 1 == 1 { tmp[d as usize >> 6] |= 1 << (d & 63); } } }
                                 std::mem::swap(&mut acc, &mut tmp);
                                 tmp.fill(0);
                             }
-                            2 => for p in &parts { for &d in dl(p, t) { acc[d as usize >> 6] |= 1 << (d & 63); } },
-                            _ => for p in &parts { for &d in dl(p, t) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
+                            2 => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] |= 1 << (d & 63); } },
+                            _ => for p in &parts { for d in dl(p, t).iter().map(|&x| p.lo + x as u32) { acc[d as usize >> 6] &= !(1 << (d & 63)); } },
                         }
                     }
                     // count and sum word by word (a byte table gives the sum of bit positions);
@@ -367,7 +376,7 @@ fn main() {
                             for &(op, t) in &v[1..] {
                                 x = match op { 1 => and(&x, dl(p, t)), 2 => or(&x, dl(p, t)), _ => not(&x, dl(p, t)) };
                             }
-                            add(&mut cnt, &mut sum, &mut r, &x);
+                            add(&mut cnt, &mut sum, &mut r, &x, p.lo);
                         }
                         Q::Phrase((ts, ks)) => {
                             // docs holding every term, then the doc text decides
@@ -375,13 +384,12 @@ fn main() {
                             let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| bslot[t as usize] != u32::MAX);
                             let mut ld = ld; ld.sort_by_key(|&t| dl(p, t).len());
                             let mut hit = if let Some(&t0) = ld.first() { dl(p, t0).to_vec() } else {
-                                let hi = p.lo as usize + p.doff.len();
-                                (p.lo as usize..hi).filter(|&d| { let d = d as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|d| d as u32).collect()
+                                (0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16).collect()
                             };
                             for &t in ld.iter().skip(1) { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
-                            if !ld.is_empty() { hit.retain(|&d| dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1)); }
-                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[(d - p.lo) as usize] as usize, ks, &lower)); }
-                            add(&mut cnt, &mut sum, &mut r, &hit);
+                            if !ld.is_empty() { hit.retain(|&x| { let d = p.lo + x as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }); }
+                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[d as usize] as usize, ks, &lower)); }
+                            add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
                         }
                     }
                 }

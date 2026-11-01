@@ -104,3 +104,6 @@ The term maps are only used while reading queries and for tokens over 16 bytes, 
 
 ## Round 14: pack() for the sample and the table keys
 rustfmt lines 800 -> 789. Exact on s7, s42, t5, full; medians the same within noise.
+
+## Round 15: u16 doc ids in the lists
+Lists hold doc ids local to their part as u16 (the part adds lo when it hands ids out); a thread closes its part and starts a new one every 65,536 docs, so any thread count or doc count works. Exact on s7, s42, t5, full, and also with parts forced to close every 1,024 docs. Local anon peak 103 -> 82 MB; medians the same (0.300/0.315 vs 0.292/0.314 s).
