@@ -154,22 +154,21 @@ fn main() {
     for c in b'0'..=b'9' { lower[c as usize] = c; }
     for c in b'A'..=b'Z' { lower[c as usize] = c + 32; }
 
-    // per thread: a doc list for every query term, plus the chunk's token stream as term ids
-    // (u32::MAX for tokens no query uses) with each doc's start, so phrases are checked
-    // by comparing ints. Chunks are in file order, so each part covers one doc range.
     // doc ids run in file order, so the last line gives the bitset size up front
     let maxdoc = { let t = docs.len().saturating_sub(1); let s0 = docs[..t].iter().rposition(|&c| c == b'\n').map_or(0, |x| x + 1);
         let mut v = 0usize; for &c in &docs[s0..] { if c == b'\t' { break; } v = v * 10 + (c - b'0') as usize; } v };
     let nw = maxdoc / 64 + 1;
     let use_bits = maxdoc < 1 << 26 && docs.len() > 0;
-    // a 4 MB sample of the docs picks the common terms (over 1 doc in 32); those never get a
-    // list: the scan marks them straight into a bitset, so their postings are never held
-    let mut bslot = vec![u32::MAX; nall];
+    // a 256 KB sample of the docs counts each term's docs. Term ids are renumbered by that
+    // count, most common first, so the counters the scan touches most sit together. The
+    // first nd terms (over 1 doc in 32) never get a list: the scan marks them straight into
+    // a bitset, so their postings are never held.
+    let mut c = vec![0u32; nall];
     let mut nd = 0usize;
     if use_bits {
         let mut e = docs.len().min(1 << 18);
         while e < docs.len() && docs[e - 1] != b'\n' { e += 1; }
-        let (mut seen, mut c) = (vec![u32::MAX; nall], vec![0u32; nall]);
+        let mut seen = vec![u32::MAX; nall];
         let (mut i, mut nd0) = (0usize, 0u32);
         while i < e {
             while docs[i] != b'\t' { i += 1; }
@@ -187,43 +186,47 @@ fn main() {
             }
         }
         // a margin under the 1 in 32 line, since the sample is small
-        for t in 0..nall { if c[t] as u64 * 48 > nd0 as u64 { bslot[t] = nd as u32; nd += 1; } }
+        nd = c.iter().filter(|&&x| x as u64 * 48 > nd0 as u64).count();
+    }
+    let mut order: Vec<u32> = (0..nall as u32).collect();
+    order.sort_by_key(|&t| std::cmp::Reverse(c[t as usize]));
+    let mut new = vec![0u32; nall];
+    for (i, &t) in order.iter().enumerate() { new[t as usize] = i as u32; }
+    for j in 0..cap { if keys[j] != 0 { vals[j] = new[vals[j] as usize]; } }
+    for v in long.values_mut() { *v = new[*v as usize]; }
+    for q in qs.iter_mut() {
+        match q { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 = new[e.1 as usize]), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t = new[*t as usize]) }
     }
     let abits: Vec<std::sync::atomic::AtomicU64> = (0..nd * nw).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
-    // a common term's table value becomes its bitset slot with the top bit set, so the scan
-    // marks it without touching last[] or a side table
-    for j in 0..cap { if keys[j] != 0 && bslot[vals[j] as usize] != u32::MAX { vals[j] = 1 << 31 | bslot[vals[j] as usize]; } }
     // the scan probes `slots`, 16 bytes each: the token's low 8 bytes, then its value and a
     // tag of its high 8 bytes (0 when it has none). Most tokens are 8 bytes or less, so a
     // lookup is one access; a longer token checks its high half in `hi`.
-    let tag = |h: u64| if h == 0 { 0 } else { (h.wrapping_mul(0x9E3779B97F4A7C15) >> 32) as u64 | 1 };
-    let mut slots: Vec<[u64; 2]> = Vec::with_capacity(cap);
-    huge(&slots);
-    slots.extend((0..cap).map(|j| [keys[j] as u64, tag((keys[j] >> 64) as u64) << 32 | vals[j] as u64]));
-    let hi: Vec<u64> = keys.iter().map(|&k| (k >> 64) as u64).collect();
-    drop(vals);
-    drop(keys);
-    for v in long.values_mut() { if bslot[*v as usize] != u32::MAX { *v = 1 << 31 | bslot[*v as usize]; } }
+    // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
+    // slot holds the whole token and its value and a lookup is one access
+    let short = Probe::<2>::new(keys.iter().zip(&vals).filter(|e| *e.0 != 0 && *e.0 >> 64 == 0).map(|(&k, &v)| (k, v)));
+    let longer = Probe::<4>::new(keys.iter().zip(&vals).filter(|e| *e.0 >> 64 != 0).map(|(&k, &v)| (k, v)));
+    drop((keys, vals));
     let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (hi, slots, long, lower, abits) = (&hi, &slots, &long, &lower, &abits);
+            let (short, longer, long, lower, abits) = (&short, &longer, &long, &lower, &abits);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 // per term: the last doc that listed it and its list length so far, side by
                 // side so a posting touches one cache line
-                let mut lc = vec![[u32::MAX, 0]; nall];
-                let counts = |lc: &mut Vec<[u32; 2]>| -> Vec<u32> { std::iter::once(0).chain(lc.iter_mut().map(|e| std::mem::replace(e, [u32::MAX, 0])[1])).collect() };
+                let mut lc = vec![[u16::MAX, 0]; nall];
+                let counts = |lc: &mut Vec<[u16; 2]>| -> Vec<u32> { std::iter::once(0).chain(lc.iter_mut().map(|e| std::mem::replace(e, [u16::MAX, 0])[1] as u32)).collect() };
                 let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
                 let (mut acc, mut aw, mut fw) = (vec![0u64; nd], usize::MAX, 0);
                 let mut i = 0;
-                // lists hold doc ids local to their part as u16, so a part closes at 65,536 docs
+                // lists hold doc ids local to their part as u16, so a part closes at 65,535 docs
+                // (a doc count then fits in u16 too, and u16::MAX means "no doc yet")
                 let mut done = Vec::new();
                 while i < c.len() {
                     let mut doc = 0u32;
                     while c[i] != b'\t' { doc = doc * 10 + (c[i] - b'0') as u32; i += 1; }
-                    if p.doff.len() == 1 << 16 {
+                    if p.doff.len() == 0xFFFF {
                         blocks.push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
                         let q = std::mem::replace(&mut p, Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() });
                         done.push((q, std::mem::take(&mut blocks), counts(&mut lc)));
@@ -249,20 +252,9 @@ fn main() {
                     i += 1;
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
-                            if t >> 31 == 1 { acc[(t & 0x7FFF_FFFF) as usize] |= 1 << ((p.lo + d) & 63); } else if lc[t as usize][0] != d { lc[t as usize] = [d, lc[t as usize][1] + 1]; put(&mut blk, t); }
+                            if (t as usize) < nd { acc[t as usize] |= 1 << ((p.lo + d) & 63); } else if lc[t as usize][0] != d as u16 { lc[t as usize] = [d as u16, lc[t as usize][1] + 1]; put(&mut blk, t); }
                         } }} }
-                    let lookup = |p: (u8, u128, usize, Option<u32>)| -> Option<u32> {
-                        if p.0 == 2 { return p.3; }
-                        let (k, mut j) = (p.1, p.2);
-                        let (lo, h) = (k as u64, (k >> 64) as u64);
-                        let g = tag(h);
-                        loop {
-                            let [a, b] = slots[j];
-                            if a == 0 { break None; }
-                            if a == lo && b >> 32 == g && (h == 0 || hi[j] == h) { break Some(b as u32); }
-                            j = (j + 1) & (cap - 1);
-                        }
-                    };
+                    let lookup = |p: (u8, u128, usize, Option<u32>)| match p.0 { 1 => short.get(p.1, p.2), 3 => longer.get(p.1, p.2), _ => p.3 };
                     let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
                     // token and LF bitmasks of a 64 byte window, then walk the bits
                     let mut o = 64; // offset inside the current window, 64 = need a new one
@@ -273,7 +265,7 @@ fn main() {
                         if bits == 0 { i += 64 - o; o = 64; continue; }
                         let z = bits.trailing_zeros() as usize;
                         i += z; o += z;
-                        if nm >> o & 1 == 1 { if pend.0 != 0 { handle!(lookup(pend)); pend.0 = 0; } break; }
+                        if nm >> o & 1 == 1 { if pend.0 != 0 { handle!(lookup(pend)); } break; }
                         let s = i;
                         let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
                         i += run; o += run;
@@ -281,11 +273,12 @@ fn main() {
                         let l = i - s;
                         // a short token's slot is prefetched and looked up one token later, so the
                         // table miss overlaps the scan of the next token
-                        let nx: (u8, u128, usize, Option<u32>) = if l <= 16 {
+                        let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
                             let k = pack(&docs[base + s..], l);
-                            let j = (hm(k) >> (shift - 64)) as usize;
-                            unsafe { std::arch::x86_64::_mm_prefetch(slots.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0); }
-                            (1, k, j, None)
+                            (1, k, short.at(k), None)
+                        } else if l <= 16 {
+                            let k = pack(&docs[base + s..], l);
+                            (3, k, longer.at(k), None)
                         } else if l <= 32 {
                             let mut t = [0u8; 32];
                             for (a, &b) in t.iter_mut().zip(&c[s..i]) { *a = lower[b as usize]; }
@@ -334,8 +327,8 @@ fn main() {
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
     // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
     let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
-    let tlen = |t: usize| if bslot[t] != u32::MAX { 4 * nw } else { parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>() };
-    let bs = |t: u32| { let i = bslot[t as usize]; (i != u32::MAX).then(|| &bits[i as usize * nw..(i as usize + 1) * nw]) };
+    let tlen = |t: usize| if t < nd { 4 * nw } else { parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>() };
+    let bs = |t: u32| { let t = t as usize; (t < nd).then(|| &bits[t * nw..(t + 1) * nw]) };
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     std::thread::scope(|sc| {
@@ -404,7 +397,7 @@ fn main() {
                             let anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
                             // docs holding every term, then the doc text decides
                             let mut order: Vec<u32> = ts.clone(); order.sort_unstable(); order.dedup();
-                            let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| bslot[t as usize] != u32::MAX);
+                            let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| (t as usize) < nd);
                             let mut ld = ld; ld.sort_by_key(|&t| dl(p, t).len());
                             let mut hit = if let Some(&t0) = ld.first() { dl(p, t0).to_vec() } else {
                                 (0..p.doff.len() as u32).filter(|&x| { let d = p.lo + x; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|x| x as u16).collect()
@@ -431,11 +424,44 @@ fn main() {
     std::process::exit(0);
 }
 
-// ask for 2 MB pages before the first touch, so random probes into a big table don't miss the TLB
-fn huge<T>(v: &Vec<T>) {
-    extern "C" { fn madvise(a: usize, l: usize, advice: i32) -> i32; }
-    let (a, l) = (v.as_ptr() as usize, v.capacity() * std::mem::size_of::<T>());
-    unsafe { madvise(a & !4095, l + (a & 4095), 14) }; // MADV_HUGEPAGE
+// open addressing on a packed token: W = 2 holds tokens of up to 8 bytes as [bytes, value],
+// W = 4 longer ones as [low bytes, high bytes, value, 0]. The slots come zeroed and page
+// aligned from mmap, so none straddles a cache line, and are asked for 2 MB pages, so
+// random probes don't miss the TLB.
+struct Probe<const W: usize> { s: &'static mut [[u64; W]], sh: u32 }
+impl<const W: usize> Probe<W> {
+    fn new(items: impl Iterator<Item = (u128, u32)> + Clone) -> Self {
+        extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; fn madvise(a: *mut u8, l: usize, advice: i32) -> i32; }
+        let cap = (2 * items.clone().count()).next_power_of_two().max(16);
+        let s = unsafe {
+            let a = mmap(std::ptr::null_mut(), cap * 8 * W, 3, 0x22, -1, 0); // read/write, private anonymous
+            madvise(a, cap * 8 * W, 14); // MADV_HUGEPAGE
+            std::slice::from_raw_parts_mut(a as *mut [u64; W], cap)
+        };
+        let p = Probe { s, sh: 64 - cap.trailing_zeros() };
+        for (k, v) in items {
+            let mut j = p.at(k);
+            while p.s[j][0] != 0 { j = (j + 1) & (cap - 1); }
+            p.s[j][0] = k as u64;
+            if W == 4 { p.s[j][1] = (k >> 64) as u64; }
+            p.s[j][W / 2] = v as u64;
+        }
+        p
+    }
+    // the home slot, prefetched: the lookup comes one token later
+    fn at(&self, k: u128) -> usize {
+        let j = (hm(k) >> self.sh) as usize;
+        unsafe { std::arch::x86_64::_mm_prefetch(self.s.as_ptr().add(j) as *const i8, std::arch::x86_64::_MM_HINT_T0) };
+        j
+    }
+    fn get(&self, k: u128, mut j: usize) -> Option<u32> {
+        loop {
+            let e = &self.s[j];
+            if e[0] == 0 { return None; }
+            if e[0] == k as u64 && (W == 2 || e[1] == (k >> 64) as u64) { return Some(e[W / 2] as u32); }
+            j = (j + 1) & (self.s.len() - 1);
+        }
+    }
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
