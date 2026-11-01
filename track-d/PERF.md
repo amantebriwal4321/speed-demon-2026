@@ -55,6 +55,10 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 
 - The integer parser reads 8 bytes at once, finds the first byte that isn't a digit, and converts the digits with SWAR. Fields of 9 or more digits fall back to the byte loop. Locally that's about 2% faster.
 
+## Round 8
+
+- Building newid and the degrees in the new order was one serial loop of 1.7M random reads inside the relabel. It now runs on all threads, with only the prefix sum left serial. Local median over 25 alternating runs went from 0.247 s to 0.236 s.
+
 ## Next ideas
 
 A hash based distance map per thread to cut memory, and a faster integer parser.

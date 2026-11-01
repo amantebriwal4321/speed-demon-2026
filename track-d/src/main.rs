@@ -179,10 +179,22 @@ fn main() {
     drop(owner);
     let order: Vec<u32> = lists.concat();
     drop(lists);
-    let mut newid = vec![0u32; n];
-    for (k, &u) in order.iter().enumerate() { newid[u as usize] = k as u32; }
+    // newid and the degrees in the new order on all threads (both are random reads), then one
+    // sequential prefix sum
+    let newid: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
     let mut noff = vec![0u32; n + 1];
-    for (k, &u) in order.iter().enumerate() { noff[k + 1] = noff[k] + off[u as usize + 1] - off[u as usize]; }
+    std::thread::scope(|sc| {
+        let per = n.div_ceil(nt).max(1);
+        for (c, (os, ds)) in order.chunks(per).zip(noff[1..].chunks_mut(per)).enumerate() {
+            let (newid, off) = (&newid, &off);
+            sc.spawn(move || for (i, (&u, d)) in os.iter().zip(ds.iter_mut()).enumerate() {
+                newid[u as usize].store((c * per + i) as u32, Relaxed);
+                *d = off[u as usize + 1] - off[u as usize];
+            });
+        }
+    });
+    for k in 0..n { noff[k + 1] += noff[k]; }
+    let newid: Vec<u32> = newid.into_iter().map(|x| x.into_inner()).collect();
     let mut nadj: Vec<(u32, u32)> = Vec::with_capacity(total);
     unsafe { nadj.set_len(total) }; // every slot is written below
     {
