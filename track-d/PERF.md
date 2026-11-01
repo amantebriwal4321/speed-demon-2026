@@ -112,3 +112,7 @@ Tried and dropped: claiming BFS nodes in a 218 KB bitset instead of the 7 MB own
 
 ## Round 20: distance tables start at 1K slots
 With 12 threads forced on 4 cores the query phase took 107 ms longer than with 4 threads for the same work, which points at cache footprint: each thread's two tables started at 16K slots (128 KB each), and on the board two hyperthreads share a core's L2. Half of all searches pop fewer than 130 nodes. Starting at 1K slots (8 KB): queries 407 -> 377 ms with 12 threads and 293 -> 283 ms with 4, over 15 alternating runs each; 4K slots was no better than 16K. Peak 82 MB both. Exact on s7, s42, t5, full.
+Board for rounds 19 + 20: run-e8a600cefc0f 0.2331 s (63.85 points, a new best), then 0.2585, 0.2353 (run-2faf370cef70), 0.2356 (run-287b797515e9, 63.93 points, a new best), 0.2344 s on the same code: the board's spread on D is about 10%.
+
+## Round 21: the number parser inlined
+perf listed `num` as its own function (3.5% of samples): three calls per edge line, 15 million in all, each with a call and spills. `#[inline(always)]`: two sets of 15 alternating runs, 0.611 -> 0.581 s and 0.638 -> 0.597 s, CPU -6%. Exact on s7, s42, t5, full, and on fresh seeds 99 (sample) and 3 (tiny) against the reference.

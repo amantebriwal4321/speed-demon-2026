@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
+#[inline(always)]
 fn num(b: &[u8], i: &mut usize) -> u32 {
     // eight bytes at once: the first byte below '0' ends the number, then SWAR the digits
     if *i + 8 <= b.len() {
