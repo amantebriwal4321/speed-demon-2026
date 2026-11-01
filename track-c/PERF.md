@@ -90,4 +90,8 @@ The region table held codes in one 2 MB array and ranks in a second one, both al
 
 ## Round 14: zeroed tables from calloc
 The name table and the seen bits (5 MB) were filled with zeros on the main thread before the parse; they now come from `alloc_zeroed`, so the kernel's zero pages fault in on the threads that use them. 21 alternating runs: -1% at 4 threads, -3% with 12 threads forced. Exact on s7, s42, t5, full; peak 8 MB both.
-Reverted (round 15): board run-f613fe81dbf3 measured 0.0836 s and 20.7 MB for rounds 13 + 14. Not reproduced locally (8-10 MB, even with THP `always`), but round 14 is the one that changed how the big tables get their pages, so it goes; round 13 stays.
+Reverted: board run-f613fe81dbf3 measured 0.0836 s and 20.7 MB for rounds 13 + 14. Not reproduced locally (8-10 MB, even with THP `always`), but round 14 is the one that changed how the big tables get their pages, so it goes; round 13 stays.
+Round 13 alone on the board: run-2c942fe50715, 0.0592 s, 10.9 MB (from 12.8), 71.16 points, a new best, rank 36 -> 33 of 94.
+
+## Round 15: region lookup as a rank query
+The region table was 2 MB indexed by region id (ids up to 999,999, 200,000 present), read once per record at random. It is now a bitset of the ids present, with the count of ids before each 64-bit word stored next to the word, and the countries in id order (regions.csv lists ids ascending): a lookup is a bit test plus a popcount, in 0.6 MB that stays in cache. 12-thread peak 8 -> 7 MB; 21 alternating runs: 0.153 -> 0.140 s at 4 threads, 0.156 -> 0.147 s with 12. Exact on s7, s42, t5, full.

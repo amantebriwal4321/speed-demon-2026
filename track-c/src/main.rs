@@ -59,25 +59,36 @@ fn main() {
 
     // regions: region_id -> country index, countries numbered in sorted order, _UNMATCHED last.
     // A code [A-Z]{3} is a number below 26^3, so counting the codes in numeric order sorts them.
+    // The 200,000 ids are spread up to 999,999, so instead of a 2 MB table by id there is a
+    // bitset of the ids present, with the count of ids before each 64-bit word, and the
+    // countries in id order (regions.csv lists ids ascending): a lookup is a bit test and a
+    // popcount in 0.6 MB that stays in cache.
     let r = map(&format!("{data}/regions.csv"));
     let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    let mut lookup: Vec<u16> = Vec::new(); // region_id -> code here, u16::MAX if absent; -> rank below
+    let (mut ids, mut country): (Vec<(u64, u32)>, Vec<u16>) = (Vec::new(), Vec::new()); // code here, rank below
     while i < r.len() {
         let mut id = 0usize;
         while r[i] != b',' { id = id * 10 + (r[i] - b'0') as usize; i += 1; }
         let c = &r[i + 1..i + 4];
-        if lookup.len() <= id { lookup.resize(id + 1, u16::MAX); }
-        lookup[id] = (c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16;
+        if ids.len() <= id / 64 { ids.resize(id / 64 + 1, (0, 0)); }
+        ids[id / 64].0 |= 1 << (id % 64);
+        country.push((c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16);
         i += 5;
     }
+    let mut before = 0;
+    for w in ids.iter_mut() { w.1 = before; before += w.0.count_ones(); }
     let mut rank = vec![u16::MAX; 17576];
-    for &c in &lookup { if c != u16::MAX { rank[c as usize] = 0; } }
+    for &c in &country { rank[c as usize] = 0; }
     let mut names: Vec<[u8; 3]> = Vec::new();
     for c in 0..17576 {
         if rank[c] == 0 { rank[c] = names.len() as u16; names.push([b'A' + (c / 676) as u8, b'A' + (c / 26 % 26) as u8, b'A' + (c % 26) as u8]); }
     }
     let unm = names.len() as u16;
-    for c in lookup.iter_mut() { *c = if *c == u16::MAX { unm } else { rank[*c as usize] }; }
+    for c in country.iter_mut() { *c = rank[*c as usize]; }
+    let lookup = |rid: usize| match ids.get(rid / 64) {
+        Some(&(w, before)) if w >> (rid % 64) & 1 == 1 => country[(before + (w & ((1 << (rid % 64)) - 1)).count_ones()) as usize],
+        _ => unm,
+    };
     let ng = names.len() + 1;
 
     let b = map(&format!("{data}/records.csv"));
@@ -127,7 +138,7 @@ fn main() {
                     if c[i] == b'\r' { i += 1; }
                     i += 1;
                     if neg { a = -a; }
-                    let g = if rid < lookup.len() { lookup[rid] } else { unm } as usize;
+                    let g = lookup(rid) as usize;
                     let x = &mut agg[g];
                     x.count += 1; x.id_sum += id; x.sum += a;
                     if a < x.min { x.min = a; }
