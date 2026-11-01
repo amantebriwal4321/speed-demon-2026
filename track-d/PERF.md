@@ -81,3 +81,6 @@ A table grown by one big search (64K-128K slots) was refilled on every query tho
 
 ## Round 13: 4-byte edges
 Every edge (parse buckets, both CSRs) is one u32: head in the low vb = ceil(log2 n) bits (21 here), weight in the rest. Weights that do not fit (3,496 of 5M, 0.07%) store all ones there and the true weight sits in a map by (tail, head); parallel big edges keep the minimum, the only one a shortest path can use. Parse buckets hold tail << 32 | packed (8 bytes, was 12). Exact on s7, s42, t5, full (which include 0 and 2^32-1 weights and parallel edges). Local anon peak 127 -> 89 MB, medians 0.2056/0.1975 -> 0.1888/0.1858 s.
+
+## Round 14: query-phase memory (not kept)
+Packed 12-byte radix entries: peak 90 -> 89 MB, time same; the heaps are not the peak. Dist tables grown at 3/4 load instead of 1/2: peak 90 -> 84 MB but medians +2-4%, a wash on the score. Both reverted.
