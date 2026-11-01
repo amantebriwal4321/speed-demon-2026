@@ -179,3 +179,7 @@ Rounds 30 + 31 on the board: run-14c0632534ec 0.2509 s, 67.1 MB, 66.25 points (a
 
 ## Round 32: two waves with the 1-in-24 cutoff (board experiment)
 To see whether the third wave is what costs the time on 12 real cores, this keeps the 1-in-24 cutoff and goes back to two waves. Exact on s7, s42, t5, full.
+Round 32 on the board: run-7cbce8dfc2fe 0.2489 s, 69.7 MB; run-ff5ca3c4b651 0.2453 s, 69.6 MB, 66.34 points, a new best; run-af6ae6c80348 0.2704 s (noise, same code).
+
+## Round 33: mmap threshold 128 KB (board experiment)
+Each scan thread keeps about 1 MB of counters, offsets and doc starts below the old 1 MB threshold, so in its malloc arena, and a kernel with THP set to `always` backs an arena heap in 2 MB pages. At 128 KB those buffers get their own small mappings. With THP `always` locally and 12 threads, peaks of 59-63 MB against 63-64 MB; time the same (11 alternating runs at 4 and 12 threads). Exact on s7, s42, t5, full, h99, h3.
