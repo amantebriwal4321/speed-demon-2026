@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 // FxHash-style hash of b[s..e], eight bytes at a time: a string of up to 8 bytes is one word
 // with the bytes past its end cleared, a longer one its 8 byte chunks and then its last 8 bytes.
@@ -8,16 +8,44 @@ use std::io::Write;
 fn fx(b: &[u8], s: usize, e: usize) -> u64 {
     let mix = |h: u64, x: u64| (h.rotate_left(5) ^ x).wrapping_mul(0x517cc1b727220a95);
     let first = u64::from_le_bytes(b[s..s + 8].try_into().unwrap());
-    if e - s <= 8 { return mix(0, first & u64::MAX.checked_shr(64 - 8 * (e - s) as u32).unwrap_or(0)); }
+    if e - s <= 8 {
+        return mix(
+            0,
+            first & u64::MAX.checked_shr(64 - 8 * (e - s) as u32).unwrap_or(0),
+        );
+    }
     let mut h = mix(0, first);
     let mut k = s + 8;
-    while k + 8 < e { h = mix(h, u64::from_le_bytes(b[k..k + 8].try_into().unwrap())); k += 8; }
+    while k + 8 < e {
+        h = mix(h, u64::from_le_bytes(b[k..k + 8].try_into().unwrap()));
+        k += 8;
+    }
     mix(h, u64::from_le_bytes(b[e - 8..e].try_into().unwrap()))
 }
 
 #[derive(Clone, Copy)]
-struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
-impl Agg { fn new() -> Self { Agg { count: 0, id_sum: 0, sum: 0, min: i64::MAX, max: i64::MIN, name_bytes: 0, note_bytes: 0 } } }
+struct Agg {
+    count: u64,
+    id_sum: i64,
+    sum: i64,
+    min: i64,
+    max: i64,
+    name_bytes: u64,
+    note_bytes: u64,
+}
+impl Agg {
+    fn new() -> Self {
+        Agg {
+            count: 0,
+            id_sum: 0,
+            sum: 0,
+            min: i64::MAX,
+            max: i64::MIN,
+            name_bytes: 0,
+            note_bytes: 0,
+        }
+    }
+}
 
 // index of the first byte equal to `c`: SSE2, 16 bytes at a time, then eight at a time near the end
 #[inline]
@@ -27,8 +55,13 @@ fn find(b: &[u8], c: u8) -> usize {
     unsafe {
         let pat = _mm_set1_epi8(c as i8);
         while i + 16 <= b.len() {
-            let m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(b.as_ptr().add(i) as *const __m128i), pat));
-            if m != 0 { return i + m.trailing_zeros() as usize; }
+            let m = _mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i),
+                pat,
+            ));
+            if m != 0 {
+                return i + m.trailing_zeros() as usize;
+            }
             i += 16;
         }
     }
@@ -48,7 +81,11 @@ fn field(b: &[u8], i: &mut usize) -> (usize, usize, u64) {
         let mut pairs = 0;
         loop {
             let q = j + find(&b[j..], b'"');
-            if b[q + 1] == b'"' { pairs += 1; j = q + 2; continue; }
+            if b[q + 1] == b'"' {
+                pairs += 1;
+                j = q + 2;
+                continue;
+            }
             *i = q + 2; // closing quote and comma
             return (start, q, (q - start - pairs) as u64);
         }
@@ -75,33 +112,56 @@ fn main() {
     while i < r.len() {
         let id = dig(r, &mut i) as usize;
         let c = &r[i + 1..i + 4];
-        if ids.len() <= id / 64 { ids.resize(id / 64 + 1, (0, 0)); }
+        if ids.len() <= id / 64 {
+            ids.resize(id / 64 + 1, (0, 0));
+        }
         ids[id / 64].0 |= 1 << (id % 64);
         country.push((c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16);
         i += 5;
     }
     let mut before = 0;
-    for w in ids.iter_mut() { w.1 = before; before += w.0.count_ones(); }
+    for w in ids.iter_mut() {
+        w.1 = before;
+        before += w.0.count_ones();
+    }
     let mut rank = vec![u16::MAX; 17576];
-    for &c in &country { rank[c as usize] = 0; }
+    for &c in &country {
+        rank[c as usize] = 0;
+    }
     let mut names: Vec<[u8; 3]> = Vec::new();
     for c in 0..17576 {
-        if rank[c] == 0 { rank[c] = names.len() as u16; names.push([b'A' + (c / 676) as u8, b'A' + (c / 26 % 26) as u8, b'A' + (c % 26) as u8]); }
+        if rank[c] == 0 {
+            rank[c] = names.len() as u16;
+            names.push([
+                b'A' + (c / 676) as u8,
+                b'A' + (c / 26 % 26) as u8,
+                b'A' + (c % 26) as u8,
+            ]);
+        }
     }
     let unm = names.len() as u16;
-    for c in country.iter_mut() { *c = rank[*c as usize]; }
+    for c in country.iter_mut() {
+        *c = rank[*c as usize];
+    }
     let lookup = |rid: usize| match ids.get(rid / 64) {
-        Some(&(w, before)) if w >> (rid % 64) & 1 == 1 => country[(before + (w & ((1 << (rid % 64)) - 1)).count_ones()) as usize],
+        Some(&(w, before)) if w >> (rid % 64) & 1 == 1 => {
+            country[(before + (w & ((1 << (rid % 64)) - 1)).count_ones()) as usize]
+        }
         _ => unm,
     };
     let ng = names.len() + 1;
 
     let b = map(&format!("{data}/records.csv"));
     let mut p = 0;
-    if b.starts_with(BOM) { p = 3; }
+    if b.starts_with(BOM) {
+        p = 3;
+    }
     p += b[p..].iter().position(|&c| c == b'\n').unwrap() + 1;
     let body = &b[p..];
-    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+    let nt = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(16);
     // a CR only ever appears as the first byte of a CRLF terminator, so cutting after "\r\n" is safe.
     // Four pieces per thread, handed out as threads come free: on the board two threads share
     // each core, and one whose neighbour is busier gets through fewer pieces.
@@ -109,7 +169,9 @@ fn main() {
     let mut cuts = vec![0usize];
     for k in 1..np {
         let mut q = (body.len() * k / np).max(*cuts.last().unwrap());
-        while q < body.len() && !(q >= 2 && body[q - 2] == b'\r' && body[q - 1] == b'\n') { q += 1; }
+        while q < body.len() && !(q >= 2 && body[q - 2] == b'\r' && body[q - 1] == b'\n') {
+            q += 1;
+        }
         cuts.push(q);
     }
     cuts.push(body.len());
@@ -122,65 +184,91 @@ fn main() {
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|_| {
-            let (lookup, table, seen, cuts, next) = (&lookup, &table, &seen, &cuts, &next);
-            sc.spawn(move || {
-                let c = body;
-                let mut agg = vec![Agg::new(); ng];
-                let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
-                loop {
-                    let p = next.fetch_add(1, Relaxed);
-                    if p >= np { break; }
-                    let (lo, hi) = (cuts[p], cuts[p + 1]);
-                    let mut i = lo;
-                    while i < hi {
-                        if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] { i += 3; }
-                        let id = dig(c, &mut i) as i64;
-                        i += 1;
-                        let (ns, ne, nl) = field(c, &mut i);
-                        let (_, _, tl) = field(c, &mut i);
-                        let rid = dig(c, &mut i) as usize;
-                        i += 1;
-                        let neg = c[i] == b'-';
-                        if neg { i += 1; }
-                        // amount is digits, a dot, then exactly two digits
-                        let mut a = dig(c, &mut i) as i64;
-                        a = a * 100 + ((c[i + 1] - b'0') * 10 + (c[i + 2] - b'0')) as i64;
-                        i += 3;
-                        if c[i] == b'\r' { i += 1; }
-                        i += 1;
-                        if neg { a = -a; }
-                        let g = lookup(rid) as usize;
-                        let x = &mut agg[g];
-                        x.count += 1; x.id_sum += id; x.sum += a;
-                        if a < x.min { x.min = a; }
-                        if a > x.max { x.max = a; }
-                        x.name_bytes += nl; x.note_bytes += tl;
-                        let h = fx(c, ns, ne);
-                        // names are told apart by a 64 bit hash of their bytes and length; with
-                        // 100,000 names a collision has odds near 1 in 10^9
-                        let me = ((h ^ (ne - ns) as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
-                        let j0 = (h >> (64 - SLOTS.trailing_zeros())) as usize; // the high bits, the best mixed
-                        // prefetch this record's slot and seen word, then insert the previous record,
-                        // so the two cache misses overlap the parse of the next record
-                        unsafe {
-                            use std::arch::x86_64::*;
-                            _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
-                            prefetchw(seen.as_ptr().add(g * words + j0 / 64));
+        let hs: Vec<_> = (0..nt)
+            .map(|_| {
+                let (lookup, table, seen, cuts, next) = (&lookup, &table, &seen, &cuts, &next);
+                sc.spawn(move || {
+                    let c = body;
+                    let mut agg = vec![Agg::new(); ng];
+                    let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
+                    loop {
+                        let p = next.fetch_add(1, Relaxed);
+                        if p >= np {
+                            break;
                         }
-                        if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
-                        pg = g; pme = me; pj = j0;
+                        let (lo, hi) = (cuts[p], cuts[p + 1]);
+                        let mut i = lo;
+                        while i < hi {
+                            if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] {
+                                i += 3;
+                            }
+                            let id = dig(c, &mut i) as i64;
+                            i += 1;
+                            let (ns, ne, nl) = field(c, &mut i);
+                            let (_, _, tl) = field(c, &mut i);
+                            let rid = dig(c, &mut i) as usize;
+                            i += 1;
+                            let neg = c[i] == b'-';
+                            if neg {
+                                i += 1;
+                            }
+                            // amount is digits, a dot, then exactly two digits
+                            let mut a = dig(c, &mut i) as i64;
+                            a = a * 100 + ((c[i + 1] - b'0') * 10 + (c[i + 2] - b'0')) as i64;
+                            i += 3;
+                            if c[i] == b'\r' {
+                                i += 1;
+                            }
+                            i += 1;
+                            if neg {
+                                a = -a;
+                            }
+                            let g = lookup(rid) as usize;
+                            let x = &mut agg[g];
+                            x.count += 1;
+                            x.id_sum += id;
+                            x.sum += a;
+                            if a < x.min {
+                                x.min = a;
+                            }
+                            if a > x.max {
+                                x.max = a;
+                            }
+                            x.name_bytes += nl;
+                            x.note_bytes += tl;
+                            let h = fx(c, ns, ne);
+                            // names are told apart by a 64 bit hash of their bytes and length; with
+                            // 100,000 names a collision has odds near 1 in 10^9
+                            let me =
+                                ((h ^ (ne - ns) as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
+                            let j0 = (h >> (64 - SLOTS.trailing_zeros())) as usize; // the high bits, the best mixed
+                                                                                    // prefetch this record's slot and seen word, then insert the previous record,
+                                                                                    // so the two cache misses overlap the parse of the next record
+                            unsafe {
+                                use std::arch::x86_64::*;
+                                _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
+                                prefetchw(seen.as_ptr().add(g * words + j0 / 64));
+                            }
+                            if pg != usize::MAX {
+                                insert(table, seen, pg, pme, pj);
+                            }
+                            pg = g;
+                            pme = me;
+                            pj = j0;
+                        }
+                        // drop this piece's page table entries now, on this thread, rather than all of
+                        // them at exit on one (madvise, unlike munmap, does not lock out the other threads'
+                        // page faults). The piece before may still read a few bytes past its end, so a
+                        // margin stays mapped at the front (and anything read again faults back in).
+                        release(&c[(lo + 256).min(hi)..hi]);
                     }
-                    // drop this piece's page table entries now, on this thread, rather than all of
-                    // them at exit on one (madvise, unlike munmap, does not lock out the other threads'
-                    // page faults). The piece before may still read a few bytes past its end, so a
-                    // margin stays mapped at the front (and anything read again faults back in).
-                    release(&c[(lo + 256).min(hi)..hi]);
-                }
-                if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
-                agg
+                    if pg != usize::MAX {
+                        insert(table, seen, pg, pme, pj);
+                    }
+                    agg
+                })
             })
-        }).collect();
+            .collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
@@ -188,20 +276,57 @@ fn main() {
     for a in &aggs {
         for g in 0..ng {
             let (t, x) = (&mut total[g], &a[g]);
-            t.count += x.count; t.id_sum += x.id_sum; t.sum += x.sum;
-            t.min = t.min.min(x.min); t.max = t.max.max(x.max);
-            t.name_bytes += x.name_bytes; t.note_bytes += x.note_bytes;
+            t.count += x.count;
+            t.id_sum += x.id_sum;
+            t.sum += x.sum;
+            t.min = t.min.min(x.min);
+            t.max = t.max.max(x.max);
+            t.name_bytes += x.name_bytes;
+            t.note_bytes += x.note_bytes;
         }
     }
-    let distinct: Vec<u64> = (0..ng).map(|g| seen[g * words..(g + 1) * words].iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()).collect();
+    let distinct: Vec<u64> = (0..ng)
+        .map(|g| {
+            seen[g * words..(g + 1) * words]
+                .iter()
+                .map(|w| w.load(Relaxed).count_ones() as u64)
+                .sum()
+        })
+        .collect();
 
-    let money = |v: i64| format!("{}{}.{:02}", if v < 0 { "-" } else { "" }, v.abs() / 100, v.abs() % 100);
+    let money = |v: i64| {
+        format!(
+            "{}{}.{:02}",
+            if v < 0 { "-" } else { "" },
+            v.abs() / 100,
+            v.abs() % 100
+        )
+    };
     let mut o = Vec::new();
     for g in 0..ng {
         let t = &total[g];
-        if t.count == 0 { continue; }
-        let key = if g == ng - 1 { "_UNMATCHED".to_string() } else { String::from_utf8_lossy(&names[g]).into_owned() };
-        writeln!(o, "{} {} {} {} {} {} {} {} {}", key, t.count, t.id_sum, money(t.sum), money(t.min), money(t.max), distinct[g], t.name_bytes, t.note_bytes).unwrap();
+        if t.count == 0 {
+            continue;
+        }
+        let key = if g == ng - 1 {
+            "_UNMATCHED".to_string()
+        } else {
+            String::from_utf8_lossy(&names[g]).into_owned()
+        };
+        writeln!(
+            o,
+            "{} {} {} {} {} {} {} {} {}",
+            key,
+            t.count,
+            t.id_sum,
+            money(t.sum),
+            money(t.min),
+            money(t.max),
+            distinct[g],
+            t.name_bytes,
+            t.note_bytes
+        )
+        .unwrap();
     }
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/aggregates.txt"), o).unwrap();
@@ -211,26 +336,41 @@ fn main() {
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
 fn map(path: &str) -> &'static [u8] {
     use std::os::unix::io::AsRawFd;
-    extern "C" { fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8; }
+    extern "C" {
+        fn mmap(a: *mut u8, l: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut u8;
+    }
     let f = std::fs::File::open(path).unwrap();
     let len = f.metadata().unwrap().len() as usize;
-    if len == 0 { return &[]; }
-    unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0), len) }
+    if len == 0 {
+        return &[];
+    }
+    unsafe {
+        std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0), len)
+    }
 }
 
 // PREFETCHW: the line comes in owned, ready for the OR that follows, instead of shared first and
 // then asked for again from whichever core last set a bit in it
 #[inline(always)]
 fn prefetchw<T>(p: *const T) {
-    unsafe { std::arch::asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags, readonly)) }
+    unsafe {
+        std::arch::asm!("prefetchw [{}]", in(reg) p, options(nostack, preserves_flags, readonly))
+    }
 }
 
 // MADV_DONTNEED on the whole pages inside `b`: the file's pages stay in the page cache, only
 // this process's mapping of them goes
 fn release(b: &[u8]) {
-    extern "C" { fn madvise(a: *const u8, l: usize, advice: i32) -> i32; }
-    let (a, e) = ((b.as_ptr() as usize + 4095) & !4095, (b.as_ptr() as usize + b.len()) & !4095);
-    if a < e { unsafe { madvise(a as *const u8, e - a, 4) }; }
+    extern "C" {
+        fn madvise(a: *const u8, l: usize, advice: i32) -> i32;
+    }
+    let (a, e) = (
+        (b.as_ptr() as usize + 4095) & !4095,
+        (b.as_ptr() as usize + b.len()) & !4095,
+    );
+    if a < e {
+        unsafe { madvise(a as *const u8, e - a, 4) };
+    }
 }
 
 const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
@@ -240,13 +380,23 @@ const WORDS: usize = SLOTS / 64;
 fn insert(table: &[AtomicU64], seen: &[AtomicU64], g: usize, me: u64, mut j: usize) {
     loop {
         let cur = table[j].load(Relaxed);
-        if cur == me { break; }
-        if cur == 0 { match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) if v == me => break, Err(_) => {} } }
+        if cur == me {
+            break;
+        }
+        if cur == 0 {
+            match table[j].compare_exchange(0, me, Relaxed, Relaxed) {
+                Ok(_) => break,
+                Err(v) if v == me => break,
+                Err(_) => {}
+            }
+        }
         j = (j + 1) & (SLOTS - 1);
     }
     // a pair seen before is only read: the line stays shared instead of moving between cores
     let w = &seen[g * WORDS + j / 64];
-    if w.load(Relaxed) >> (j % 64) & 1 == 0 { w.fetch_or(1 << (j % 64), Relaxed); }
+    if w.load(Relaxed) >> (j % 64) & 1 == 0 {
+        w.fetch_or(1 << (j % 64), Relaxed);
+    }
 }
 
 // the digits at b[*i..], leaving *i on the first non digit: 8 bytes at once with SWAR, the
@@ -259,7 +409,9 @@ fn dig(b: &[u8], i: &mut usize) -> u64 {
         let stop = (d | d.wrapping_add(0x7676767676767676)) & 0x8080808080808080;
         if stop != 0 {
             let n = (stop.trailing_zeros() / 8) as usize;
-            if n == 0 { return 0; }
+            if n == 0 {
+                return 0;
+            }
             let x = (d << (8 * (8 - n))) & 0x0F0F0F0F0F0F0F0F;
             let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
             let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
@@ -268,6 +420,9 @@ fn dig(b: &[u8], i: &mut usize) -> u64 {
         }
     }
     let mut v = 0u64;
-    while *i < b.len() && b[*i].is_ascii_digit() { v = v * 10 + (b[*i] - b'0') as u64; *i += 1; }
+    while *i < b.len() && b[*i].is_ascii_digit() {
+        v = v * 10 + (b[*i] - b'0') as u64;
+        *i += 1;
+    }
     v
 }
