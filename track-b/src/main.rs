@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-type FxMap<K, V> = HashMap<K, V>;
 
 
 
@@ -88,7 +87,7 @@ fn masks(b: &[u8], at: usize) -> (u64, u64) {
 fn hm(k: u128) -> u64 { (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F) }
 // query terms go straight into the scan's table: open addressing on the packed token, grown
 // at half full; terms over 16 bytes go to a small map. Ids are handed out in first-seen order.
-struct Tab<'a> { keys: Vec<u128>, vals: Vec<u32>, n: u32, long: FxMap<&'a [u8], u32> }
+struct Tab<'a> { keys: Vec<u128>, vals: Vec<u32>, n: u32, long: HashMap<&'a [u8], u32> }
 impl<'a> Tab<'a> {
     fn put(keys: &mut [u128], vals: &mut [u32], k: u128, v: u32) -> u32 {
         let (m, sh) = (keys.len() - 1, 64 - keys.len().trailing_zeros());
@@ -109,7 +108,7 @@ impl<'a> Tab<'a> {
 }
 
 fn main() {
-    // keep big blocks on their own mappings, so a freed pair block goes back to the kernel
+    // keep big blocks on their own mappings, so a freed posting block goes back to the kernel
     // (glibc would otherwise raise its mmap threshold and keep them in the heap)
     extern "C" { fn mallopt(p: i32, v: i32) -> i32; }
     unsafe { mallopt(-3, 1 << 20) }; // M_MMAP_THRESHOLD
@@ -200,9 +199,6 @@ fn main() {
         match q { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 = new[e.1 as usize]), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t = new[*t as usize]) }
     }
     let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
-    // the scan probes `slots`, 16 bytes each: the token's low 8 bytes, then its value and a
-    // tag of its high 8 bytes (0 when it has none). Most tokens are 8 bytes or less, so a
-    // lookup is one access; a longer token checks its high half in `hi`.
     // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
     // slot holds the whole token and its value and a lookup is one access
     let short = Probe::<2>::new(keys.iter().zip(&vals).filter(|e| *e.0 != 0 && *e.0 >> 64 == 0).map(|(&k, &v)| (k, v)));
