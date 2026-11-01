@@ -69,33 +69,17 @@ fn main() {
     // bitset of the ids present, with the count of ids before each 64-bit word, and the
     // countries in id order (regions.csv lists ids ascending): a lookup is a bit test and a
     // popcount in 0.6 MB that stays in cache.
-    // The rows are read on every thread, a line-aligned share each: the words of the bitset its
-    // ids fall in (ids ascend through the file, so the shares' words follow on) and its country
-    // codes in order.
-    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     let r = map(&format!("{data}/regions.csv"));
-    let top = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    let cut = |k: usize| { let mut q = top + (r.len() - top) * k / nt; while q < r.len() && r[q - 1] != b'\n' { q += 1; } q };
-    let shares: Vec<(usize, Vec<u64>, Vec<u16>)> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|k| { let (lo, hi) = (cut(k), cut(k + 1)); sc.spawn(move || {
-            let (mut first, mut words, mut codes) = (usize::MAX, Vec::new(), Vec::with_capacity((hi - lo) / 6));
-            let mut i = lo;
-            while i < hi {
-                let id = dig(r, &mut i) as usize;
-                let c = &r[i + 1..i + 4];
-                first = first.min(id / 64);
-                if words.len() <= id / 64 - first { words.resize(id / 64 - first + 1, 0); }
-                words[id / 64 - first] |= 1u64 << (id % 64);
-                codes.push((c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16);
-                i += 5;
-            }
-            (first, words, codes)
-        }) }).collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    let mut ids: Vec<(u64, u32)> = vec![(0, 0); shares.iter().filter(|s| !s.1.is_empty()).map(|s| s.0 + s.1.len()).max().unwrap_or(0)]; // code here, rank below
-    for (first, words, _) in &shares { for (j, &w) in words.iter().enumerate() { ids[first + j].0 |= w; } }
-    let mut country: Vec<u16> = shares.iter().flat_map(|s| s.2.iter().copied()).collect();
+    let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
+    let (mut ids, mut country): (Vec<(u64, u32)>, Vec<u16>) = (Vec::new(), Vec::new()); // code here, rank below
+    while i < r.len() {
+        let id = dig(r, &mut i) as usize;
+        let c = &r[i + 1..i + 4];
+        if ids.len() <= id / 64 { ids.resize(id / 64 + 1, (0, 0)); }
+        ids[id / 64].0 |= 1 << (id % 64);
+        country.push((c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16);
+        i += 5;
+    }
     let mut before = 0;
     for w in ids.iter_mut() { w.1 = before; before += w.0.count_ones(); }
     let mut rank = vec![u16::MAX; 17576];
@@ -117,6 +101,7 @@ fn main() {
     if b.starts_with(BOM) { p = 3; }
     p += b[p..].iter().position(|&c| c == b'\n').unwrap() + 1;
     let body = &b[p..];
+    let nt = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
     // a CR only ever appears as the first byte of a CRLF terminator, so cutting after "\r\n" is safe.
     // Four pieces per thread, handed out as threads come free: on the board two threads share
     // each core, and one whose neighbour is busier gets through fewer pieces.
