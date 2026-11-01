@@ -138,8 +138,7 @@ fn main() {
     let hm = |k: u128| (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F);
     for (t, &id) in &ids {
         if t.len() > 16 { long.insert(t, id); continue; }
-        let mut k = 0u128;
-        for (i, &c) in t.iter().enumerate() { k |= (c as u128) << (8 * i); }
+        let k = pack(t, t.len());
         let mut i = h(k);
         while keys[i] != 0 { i = (i + 1) & (cap - 1); }
         keys[i] = k; vals[i] = id;
@@ -179,15 +178,13 @@ fn main() {
         while i < e {
             while docs[i] != b'\t' { i += 1; }
             nd0 += 1;
-            let mut w = [0u8; 16];
             loop {
                 while lower[docs[i] as usize] == 0 && docs[i] != b'\n' { i += 1; }
                 if docs[i] == b'\n' { i += 1; break; }
                 let s0 = i;
-                while lower[docs[i] as usize] != 0 { if i - s0 < 16 { w[i - s0] = lower[docs[i] as usize]; } i += 1; }
-                let l = i - s0;
-                if l > 16 { continue; }
-                let mut kk = 0u128; for q in 0..l { kk |= (w[q] as u128) << (8 * q); }
+                while lower[docs[i] as usize] != 0 { i += 1; }
+                if i - s0 > 16 { continue; }
+                let kk = pack(&docs[s0..], i - s0);
                 let mut j = h(kk);
                 let t = loop { let x = keys[j]; if x == kk { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); };
                 if let Some(t) = t { if seen[t as usize] != nd0 { seen[t as usize] = nd0; c[t as usize] += 1; } }

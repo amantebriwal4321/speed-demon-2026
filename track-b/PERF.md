@@ -101,3 +101,6 @@ words included. rustfmt'd code lines 943 -> 827. Exact on s7, s42, t5, full; med
 
 ## Round 13: std HashMap
 The term maps are only used while reading queries and for tokens over 16 bytes, so the custom Fx hasher went. rustfmt lines 827 -> 800. Exact on s7, s42, t5, full; medians 0.303 vs 0.299 s.
+
+## Round 14: pack() for the sample and the table keys
+rustfmt lines 800 -> 789. Exact on s7, s42, t5, full; medians the same within noise.
