@@ -85,25 +85,34 @@ fn masks(b: &[u8], at: usize) -> (u64, u64) {
 }
 
 fn hm(k: u128) -> u64 { (k as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((k >> 64) as u64).wrapping_mul(0xC2B2AE3D27D4EB4F) }
-// query terms go straight into the scan's table: open addressing on the packed token, grown
-// at half full; terms over 16 bytes go to a small map. Ids are handed out in first-seen order.
+// the query terms: open addressing on the packed token, with a slot for every term occurrence
+// so it never grows; terms over 16 bytes go to a small map. Ids are handed out in first-seen order.
 struct Tab<'a> { keys: Vec<u128>, vals: Vec<u32>, n: u32, long: HashMap<&'a [u8], u32> }
 impl<'a> Tab<'a> {
-    fn put(keys: &mut [u128], vals: &mut [u32], k: u128, v: u32) -> u32 {
-        let (m, sh) = (keys.len() - 1, 64 - keys.len().trailing_zeros());
-        let mut i = (hm(k) >> sh) as usize;
-        loop { if keys[i] == k { return vals[i]; } if keys[i] == 0 { keys[i] = k; vals[i] = v; return v; } i = (i + 1) & m; }
-    }
-    fn term(&mut self, t: &'a [u8]) -> u32 {
-        let n = self.n;
-        let id = if t.len() > 16 { *self.long.entry(t).or_insert(n) } else { Self::put(&mut self.keys, &mut self.vals, pack(t, t.len()), n) };
-        if id == n { self.n += 1; }
-        if self.n as usize * 2 > self.keys.len() {
-            let c = self.keys.len() * 2;
-            let (ok, ov) = (std::mem::replace(&mut self.keys, vec![0; c]), std::mem::replace(&mut self.vals, vec![0; c]));
-            for (k, v) in ok.into_iter().zip(ov) { if k != 0 { Self::put(&mut self.keys, &mut self.vals, k, v); } }
-        }
-        id
+    // the table of `words`, and each word's id. Each word's slot is prefetched 16 words ahead,
+    // so the cache misses on a table this size overlap instead of coming one after another.
+    fn new(words: &[&'a [u8]]) -> (Self, Vec<u32>) {
+        let cap = (words.len() + 1).next_power_of_two().max(16);
+        let mut t = Tab { keys: vec![0; cap], vals: vec![0; cap], n: 0, long: HashMap::new() };
+        let home = |w: &[u8]| { let k = pack(w, w.len()); (k, (hm(k) >> (64 - cap.trailing_zeros())) as usize) };
+        let mut ring = [(0u128, 0usize); 16]; // the keys and home slots of the next 16 words
+        for (x, w) in words.iter().take(16).enumerate() { ring[x] = home(w); }
+        let ids = words.iter().enumerate().map(|(x, w)| {
+            let (k, mut j) = ring[x % 16];
+            if let Some(w) = words.get(x + 16) {
+                ring[x % 16] = home(w);
+                let j = ring[x % 16].1;
+                use std::arch::x86_64::*;
+                unsafe { _mm_prefetch(t.keys.as_ptr().add(j) as *const i8, _MM_HINT_T0); _mm_prefetch(t.vals.as_ptr().add(j) as *const i8, _MM_HINT_T0); }
+            }
+            let n = t.n;
+            let id = if w.len() > 16 { *t.long.entry(w).or_insert(n) } else {
+                loop { if t.keys[j] == k { break t.vals[j]; } if t.keys[j] == 0 { t.keys[j] = k; t.vals[j] = n; break n; } j = (j + 1) & (cap - 1); }
+            };
+            if id == n { t.n += 1; }
+            id
+        }).collect();
+        (t, ids)
     }
 }
 
@@ -116,26 +125,41 @@ fn main() {
     let out = std::env::var("OUT").unwrap_or("/out".into());
     let qb = map(&format!("{data}/queries.txt"));
 
-    // queries first: only the terms they use get indexed
-    let mut tab = Tab { keys: vec![0; 1 << 12], vals: vec![0; 1 << 12], n: 0, long: HashMap::new() };
-    // the queries, flat: a BOOL query is a range of (op, term) pairs in `ops`, a phrase a range
-    // of terms in `pt` with its words in `pw`, so reading them allocates nothing per query
-    let (mut ops, mut pt, mut pw, mut qr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for line in qb.split(|&c| c == b'\n') {
-        if line.is_empty() { continue; }
-        if line.starts_with(b"BOOL ") {
-            let (a, mut w) = (ops.len(), line[5..].split(|&c| c == b' '));
-            ops.push((0u8, tab.term(w.next().unwrap())));
-            while let (Some(op), Some(t)) = (w.next(), w.next()) {
-                ops.push((match op { b"AND" => 1, b"OR" => 2, _ => 3 }, tab.term(t)));
+    // queries first: only the terms they use get indexed.
+    // The queries, flat: a BOOL query is a range of (op, term) pairs in `ops`, a phrase a range
+    // of terms in `pt` with its words in `pw`, so reading them allocates nothing per query.
+    // A term is first its place in `words`, then its id once the table has seen every word.
+    // `words` gets its own mapping up front (over the mmap threshold), so it never sits in the heap
+    let (mut words, mut ops, mut pt, mut qr) = (Vec::with_capacity(qb.len() / 4), Vec::new(), Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < qb.len() {
+        if qb[i] == b'\n' { i += 1; continue; }
+        let bool_q = qb[i] == b'B';
+        i += if bool_q { 5 } else { 8 }; // past "BOOL " or "PHRASE \""
+        let a = if bool_q { ops.len() } else { pt.len() };
+        // words end at a space, the LF or a phrase's closing quote; in a BOOL query every other
+        // word is an operator, told apart by its first letter
+        let mut op = 0u8; // the operator before the next BOOL term, 0 for the first
+        for n in 0.. {
+            let s = i;
+            while !matches!(qb[i], b' ' | b'\n' | b'"') { i += 1; }
+            if bool_q && n % 2 == 1 {
+                op = match qb[s] { b'A' => 1, b'O' => 2, _ => 3 };
+            } else {
+                if bool_q { ops.push((op, words.len() as u32)) } else { pt.push(words.len() as u32) }
+                words.push(&qb[s..i]);
             }
-            qr.push((true, a, ops.len()));
-        } else {
-            let a = pt.len();
-            for t in line[8..line.len() - 1].split(|&c| c == b' ') { pt.push(tab.term(t)); pw.push(t); }
-            qr.push((false, a, pt.len()));
+            if qb[i] != b' ' { break; }
+            i += 1;
         }
+        i += if qb[i] == b'"' { 2 } else { 1 }; // the closing quote and the LF
+        qr.push((bool_q, a, if bool_q { ops.len() } else { pt.len() }));
     }
+    let (tab, ids) = Tab::new(&words);
+    let pw: Vec<&[u8]> = pt.iter().map(|&x| words[x as usize]).collect();
+    for e in ops.iter_mut() { e.1 = ids[e.1 as usize]; }
+    for t in pt.iter_mut() { *t = ids[*t as usize]; }
+    drop((words, ids));
     let nterm = tab.n as usize;
     let nall = nterm;
     let Tab { keys, mut vals, mut long, .. } = tab;
