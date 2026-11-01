@@ -102,3 +102,6 @@ Rounds 15 + 16 on the board: run-9e2e34661d58, 0.0539 s, 9.3 MB, 72.78 points, a
 
 ## Round 17: fewer instructions per record and per region
 callgrind on s7: the 200,000 region rows (the same count at every scale) took 14M instructions in a byte loop on the main thread, about 2.5 ms before any record is read; region ids now go through the 8-byte SWAR `dig`. The BOM test at each record start was `starts_with`, a `memcmp` call worth 3.5% of all instructions; it is three byte compares again (it went out with round 12's revert). 21 alternating runs: 0.141 -> 0.138 s at 4 threads, 0.150 -> 0.141 s with 12. Exact on s7, s42, t5, full.
+
+## Round 18: field() inlined
+callgrind counts about 730 instructions per record, and `field` was a real call twice per record (332,000 calls on s7) with its prologue and spills. `#[inline(always)]`: CPU 0.50 -> 0.47 s at 4 threads and 0.48 -> 0.45 s with 12, 21 alternating runs each. Exact on s7, s42, t5, full, and on two fresh seeds checked against the reference (99 at sample scale, 3 at tiny).

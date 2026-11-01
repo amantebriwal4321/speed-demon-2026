@@ -35,6 +35,7 @@ const BOM: &[u8] = b"\xEF\xBB\xBF";
 // parse one text field at b[*i..]. Returns the raw bytes between the quotes (or the unquoted
 // bytes) and the unescaped length, and leaves *i after the comma. Unescaping is one to one
 // ("" <-> "), so two raw slices are equal exactly when their values are.
+#[inline(always)]
 fn field(b: &[u8], i: &mut usize) -> (usize, usize, u64) {
     if b[*i] == b'"' {
         let start = *i + 1;
