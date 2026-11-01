@@ -23,7 +23,9 @@ impl Hr {
     }
 }
 
-struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)> }
+// a thread's endpoints: hash slots, and per id its text's place in `text` (a copy, so a long
+// name is compared in cache rather than against its first line somewhere in the file)
+struct Eps { slot: Vec<u32>, start: Vec<u32>, len: Vec<u32>, key: Vec<(u64, u64, u32)>, text: Vec<u8> }
 const TB: usize = 1 << 13;
 
 fn main() {
@@ -51,7 +53,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let (lo, hi) = (cuts[k], cuts[k + 1]);
             sc.spawn(move || {
-                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new() };
+                let mut e = Eps { slot: vec![u32::MAX; TB], start: Vec::new(), len: Vec::new(), key: Vec::new(), text: Vec::new() };
                 let mut rows: Vec<Hr> = (0..HOURS).map(|_| Hr { blocks: Vec::new(), side: Vec::new() }).collect();
                 // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
                 // so finding the next line never waits on parsing this one.
@@ -97,7 +99,6 @@ fn main() {
                             for &d in &c[s4 + 1..lf] { v = v * 10 + (d - b'0') as u64; }
                             v
                         };
-                        let base = 0usize;
                         let l = ee - es;
                         let (w0, w1) = if l >= 8 { (ld8(c, es), ld8(c, ee - 8)) } else { (ld8(c, es) & ((1u64 << (8 * l)) - 1), 0) };
                         let h = ((w0.wrapping_mul(0x9E3779B97F4A7C15) ^ w1.wrapping_mul(0xC2B2AE3D27D4EB4F) ^ (l as u64).wrapping_mul(0x165667B19E3779F9)) >> 50) as usize & (TB - 1);
@@ -106,12 +107,13 @@ fn main() {
                             let x = unsafe { *e.slot.get_unchecked(s) };
                             if x == u32::MAX {
                                 let id = e.start.len() as u32;
-                                e.slot[s] = id; e.start.push((es + base) as u32); e.len.push(l as u32);
+                                e.slot[s] = id; e.start.push(e.text.len() as u32); e.len.push(l as u32);
+                                e.text.extend_from_slice(&c[es..ee]);
                                 e.key.push((w0, w1, l as u32));
                                 break id;
                             }
                             let k = unsafe { e.key.get_unchecked(x as usize) };
-                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; c[st..st + l] == c[es..ee] }) { break x; }
+                            if k.0 == w0 && k.1 == w1 && k.2 == l as u32 && (l <= 16 || { let st = e.start[x as usize] as usize; e.text[st..st + l] == c[es..ee] }) { break x; }
                             s = (s + 1) & (TB - 1);
                         };
                         let r = unsafe { rows.get_unchecked_mut(hour) };
@@ -127,15 +129,16 @@ fn main() {
 
     // global ids in byte order of the endpoint text
     // distinct names through a hash map, one sort of the 1,842, then each thread's ids mapped
-    let name = |e: &Eps, x: usize| -> &'static [u8] { &b[e.start[x] as usize..(e.start[x] + e.len[x]) as usize] };
+    fn name(e: &Eps, x: usize) -> &[u8] { &e.text[e.start[x] as usize..(e.start[x] + e.len[x]) as usize] }
+    let (eps, parts): (Vec<Eps>, Vec<Vec<Hr>>) = parts.into_iter().unzip();
     let mut uniq: std::collections::HashMap<&[u8], u32> = std::collections::HashMap::with_capacity(4096);
-    for (e, _) in &parts { for x in 0..e.len.len() { uniq.entry(name(e, x)).or_insert(0); } }
+    for e in &eps { for x in 0..e.len.len() { uniq.entry(name(e, x)).or_insert(0); } }
     let mut all: Vec<&[u8]> = uniq.keys().copied().collect();
     all.sort_unstable();
     for (r, k) in all.iter().enumerate() { *uniq.get_mut(k).unwrap() = r as u32; }
     let ne = all.len();
-    let maps: Vec<Vec<u32>> = parts.iter().map(|(e, _)| (0..e.len.len()).map(|x| uniq[name(e, x)]).collect()).collect();
-    let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(|(_, r)| std::sync::Mutex::new(r)).collect();
+    let maps: Vec<Vec<u32>> = eps.iter().map(|e| (0..e.len.len()).map(|x| uniq[name(e, x)]).collect()).collect();
+    let parts: Vec<std::sync::Mutex<Vec<Hr>>> = parts.into_iter().map(std::sync::Mutex::new).collect();
     let _ = &parts;
     let rows_of = |pi: usize, h: usize| std::mem::replace(&mut parts[pi].lock().unwrap()[h], Hr { blocks: Vec::new(), side: Vec::new() });
 
