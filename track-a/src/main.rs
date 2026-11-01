@@ -11,7 +11,7 @@ fn ld8(b: &[u8], i: usize) -> u64 { unsafe { (b.as_ptr().add(i) as *const u64).r
 // local id << 21 | is_5xx << 20 | latency; latencies from 2^20 - 1 up (about 1%) and ids past
 // 2046 go to `side` as full u64 rows instead
 const LAT_ESC: u32 = (1 << 20) - 1;
-const BLK: usize = 4096;
+const BLK: usize = 16384; // 64 KB, so far fewer mmap and munmap calls; untouched pages of a last block cost nothing
 struct Hr { blocks: Vec<Vec<u32>>, side: Vec<u64> }
 impl Hr {
     #[inline(always)]
