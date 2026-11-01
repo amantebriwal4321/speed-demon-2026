@@ -19,29 +19,6 @@ impl Hasher for Fx {
 type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
 
 
-// key of a token over 16 bytes: its hash with the top bit set, which no packed token has
-fn long(h: u64) -> u128 { 1 << 127 | h as u128 }
-fn has(docs: &[u8], mut i: usize, ks: &[u128]) -> bool {
-    let (n, mut ring, mut seen) = (ks.len(), [0u128; 8], 0usize); // last 8 tokens, tokens seen
-    let (mut o, mut tm, mut nm) = (64, 0u64, 0u64);
-    loop {
-        if o >= 64 { (tm, nm) = masks(docs, i); o = 0; }
-        let bits = (tm | nm) >> o;
-        if bits == 0 { i += 64 - o; o = 64; continue; }
-        let z = bits.trailing_zeros() as usize;
-        i += z; o += z;
-        if nm >> o & 1 == 1 { return false; }
-        let s = i;
-        let run = (!(tm >> o)).trailing_zeros() as usize;
-        i += run; o += run;
-        if o >= 64 { while docs[i].is_ascii_alphanumeric() { i += 1; } o = 64; }
-        let l = i - s;
-        let t = if l > 16 { long(docs[s..i].iter().fold(0, |h, &x| (h ^ x.to_ascii_lowercase() as u64).wrapping_mul(0x100000001b3))) } else { pack(&docs[s..], l) };
-        ring[seen & 7] = t;
-        seen += 1;
-        if t == ks[n - 1] && seen >= n && (0..n).all(|j| ring[(seen - n + j) & 7] == ks[j]) { return true; }
-    }
-}
 
 // only the count, the sum and the first ten ids are printed
 fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u32]) {
@@ -54,7 +31,7 @@ const BLK: usize = 1 << 21; // u16 entries per block, each block sized up front 
 
 struct Part { lo: u32, lists: Vec<u32>, loff: Vec<u32>, doff: Vec<u32> }
 
-enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<u128>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
+enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<&'static [u8]>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
 
 // does sorted b contain x, searching forward from *j (galloping); moves *j along
 fn seek(b: &[u32], j: &mut usize, x: u32) -> bool {
@@ -159,26 +136,11 @@ fn main() {
         } else {
             let inner = &line[8..line.len() - 1];
             let w: Vec<&[u8]> = inner.split(|&c| c == b' ').collect();
-            qs.push(Q::Phrase((w.iter().map(|t| term(&mut ids, t)).collect(), w.iter().map(|t| if t.len() > 16 { long(t.iter().fold(0, |h, &x| (h ^ x as u64).wrapping_mul(0x100000001b3))) } else { pack(t, t.len()) }).collect())));
+            qs.push(Q::Phrase((w.iter().map(|t| term(&mut ids, t)).collect(), w.clone())));
         }
     }
     let nterm = ids.len();
-    // adjacent pairs of phrase terms get their own doc lists: they answer two term phrases
-    // outright and leave very few docs for longer ones to check
-    let mut pairs: FxMap<u64, u32> = FxMap::default();
-    for q in qs.iter().filter(|_| false) { if let Q::Phrase((ts, _)) = q { for w in ts.windows(2) { let n = (nterm + pairs.len()) as u32; pairs.entry((w[0] as u64 + 1) << 32 | w[1] as u64).or_insert(n); } } }
-    let nall = nterm + pairs.len();
-    let bcap = (pairs.len() * 2).next_power_of_two().max(16);
-    let bsh = 64 - bcap.trailing_zeros();
-    let (mut bk, mut bv) = (vec![0u64; bcap], vec![0u32; bcap]);
-    let mut pf = vec![0u64; 1 << 14]; // 128 KB bitmap of pair hashes: most adjacent pairs stop here
-    for (&k, &v) in &pairs {
-        let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
-        while bk[j] != 0 { j = (j + 1) & (bcap - 1); }
-        bk[j] = k; bv[j] = v;
-        let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
-        pf[f >> 6] |= 1 << (f & 63);
-    }
+    let nall = nterm;
     // open addressing table from a token packed into a u128 (tokens of 16 bytes or less)
     // to its term id; longer query terms go to a small fallback map
     let cap = (nterm * 2).next_power_of_two().max(16);
@@ -257,7 +219,7 @@ fn main() {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, bk, bv, pf, bslot, abits) = (&keys, &vals, &long, &lower, &bk, &bv, &pf, &bslot, &abits);
+            let (keys, vals, long, lower, abits) = (&keys, &vals, &long, &lower, &abits);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
@@ -267,7 +229,6 @@ fn main() {
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
-                    let mut prev = u32::MAX;
                     while c[i] != b'\t' { doc = doc * 10 + (c[i] - b'0') as u32; i += 1; }
                     if p.lo == u32::MAX { p.lo = doc; }
                     // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
@@ -283,17 +244,7 @@ fn main() {
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
                             if t >> 31 == 1 { acc[(t & 0x7FFF_FFFF) as usize] |= 1 << ((p.lo + d) & 63); } else if last[t as usize] != d { last[t as usize] = d; { put(&mut blk, t); cnt[t as usize + 1] += 1; } }
-                            if false && prev != u32::MAX {
-                                let k = (prev as u64 + 1) << 32 | t as u64;
-                                let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
-                                let mut j = (k.wrapping_mul(0x9E3779B97F4A7C15) >> bsh) as usize;
-                                while pf[f >> 6] >> (f & 63) & 1 == 1 && bk[j] != 0 {
-                                    if bk[j] == k { let b = bv[j]; if last[b as usize] != d { last[b as usize] = d; put(&mut blk, b); cnt[b as usize + 1] += 1; } break; }
-                                    j = (j + 1) & (bcap - 1);
-                                }
-                            }
-                        }
-                        prev = id.unwrap_or(u32::MAX); }} }
+                        } }} }
                     let lookup = |p: (u8, u128, usize, Option<u32>)| -> Option<u32> {
                         if p.0 == 2 { return p.3; }
                         let (k, mut j) = (p.1, p.2);
@@ -343,7 +294,6 @@ fn main() {
     // which leaves out nearly half the postings
     let parts: Vec<Part> = std::thread::scope(|sc| {
         let hs: Vec<_> = scan.into_iter().map(|(mut p, blocks, mut cnt)| {
-            let (bslot, abits) = (&bslot, &abits);
             sc.spawn(move || {
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut cur = cnt.clone();
@@ -447,7 +397,7 @@ fn main() {
                             };
                             for &t in ld.iter().skip(1) { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
                             if !ld.is_empty() { hit.retain(|&d| dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1)); }
-                            if ts.len() > 1 { let short = ks.iter().all(|&k| k >> 127 == 0); hit.retain(|&d| { let at = p.doff[(d - p.lo) as usize] as usize; if short { has2(docs, at, ks, &lower) } else { has(docs, at, ks) } }); }
+                            if ts.len() > 1 { hit.retain(|&d| has2(docs, p.doff[(d - p.lo) as usize] as usize, ks, &lower)); }
                             add(&mut cnt, &mut sum, &mut r, &hit);
                         }
                     }
@@ -487,14 +437,13 @@ fn put(b: &mut Vec<u16>, t: u32) {
 
 // phrase check on the doc text: find the first word's first byte 16 at a time (case folded),
 // then match the words exactly as whole tokens through the lowercase table
-fn has2(docs: &[u8], start: usize, ks: &[u128], lower: &[u8; 256]) -> bool {
+fn has2(docs: &[u8], start: usize, ks: &[&[u8]], lower: &[u8; 256]) -> bool {
     use std::arch::x86_64::*;
-    let word = |k: u128| { let l = 16 - (k.leading_zeros() / 8) as usize; (k.to_le_bytes(), l) };
-    let (w0, _) = word(ks[0]);
+    let w0 = ks[0];
     let at = |j: usize| -> bool {
         let mut j = j;
         for (n, &k) in ks.iter().enumerate() {
-            let (w, l) = word(k);
+            let (w, l) = (k, k.len());
             for m in 0..l { if lower[docs[j + m] as usize] != w[m] { return false; } }
             j += l;
             if lower[docs[j] as usize] != 0 { return false; }

@@ -92,3 +92,9 @@ with one fetch_or per word, and never writes a posting or touches last[] for the
 terms is exact, the sample only steers memory. Exact on s7, s42, t5, full.
 Local: anon peak 120 MB -> 103 MB, medians 0.304 s vs 0.307 s (within noise).
 Atomic fetch_or per posting was +16%, and keeping the bslot side lookup was +5%.
+
+## Round 12: less code (S axis)
+S is scored against the reference's 91 lines at exponent 0.15, so dead code costs points.
+Removed the disabled phrase-pair table and its scan branch, and the tokenizing phrase check:
+phrases now keep their words as byte slices and every phrase goes through the text scan, long
+words included. rustfmt'd code lines 943 -> 827. Exact on s7, s42, t5, full; medians unchanged.
