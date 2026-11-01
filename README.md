@@ -9,4 +9,4 @@ cd track-a && cargo build --release
 DATA=path/to/data OUT=/tmp/out ./target/release/solution
 ```
 
-See `PERF.md` for timings and the why behind them. MIT licensed.
+See `PERF.md` for timings and the why behind them (each track's own `PERF.md` has every round, kept or not), and `RUNS.md` for the board's runs one by one, which shows how much the same code varies from run to run. MIT licensed.
