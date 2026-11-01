@@ -31,10 +31,10 @@ fn num(b: &[u8], i: &mut usize) -> u32 {
 // kept in a side map.
 const SPILL: u32 = u32::MAX - 1;
 // slot = node << 32 | dist, all ones when empty: key and value share one load
-struct Dist { t: Vec<u64>, len: usize, big: std::collections::HashMap<u32, u64> }
+struct Dist { t: Vec<u64>, len: usize, big: std::collections::HashMap<u32, u64>, used: Vec<u32> }
 const E: u64 = u64::MAX;
 impl Dist {
-    fn new() -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default() } }
+    fn new() -> Self { Dist { t: vec![E; 1 << 14], len: 0, big: Default::default(), used: Vec::new() } }
     #[inline]
     fn slot(&self, v: u32) -> usize {
         let m = self.t.len() - 1;
@@ -57,6 +57,7 @@ impl Dist {
         if self.t[i] == E {
             if (self.len + 1) * 2 > self.t.len() { self.grow(); i = self.slot(v); }
             self.len += 1;
+            self.used.push(i as u32);
         }
         let x = if d < SPILL as u64 { d as u32 } else { self.big.insert(v, d); SPILL };
         self.t[i] = (v as u64) << 32 | x as u64;
@@ -64,9 +65,14 @@ impl Dist {
     fn grow(&mut self) {
         let c = self.t.len() * 2;
         let old = std::mem::replace(&mut self.t, vec![E; c]);
-        for k in old { if k != E { let i = self.slot((k >> 32) as u32); self.t[i] = k; } }
+        self.used.clear();
+        for k in old { if k != E { let i = self.slot((k >> 32) as u32); self.t[i] = k; self.used.push(i as u32); } }
     }
-    fn clear(&mut self) { self.t.fill(E); self.len = 0; self.big.clear(); }
+    // most searches touch a few thousand slots of a table grown by an earlier big one
+    fn clear(&mut self) {
+        if self.used.len() * 16 < self.t.len() { for &i in &self.used { self.t[i as usize] = E; } } else { self.t.fill(E); }
+        self.used.clear(); self.len = 0; self.big.clear();
+    }
 }
 
 struct Ptr2(*mut (u32, u32));

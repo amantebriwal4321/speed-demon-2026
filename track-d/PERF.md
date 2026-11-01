@@ -75,3 +75,6 @@ Removed: exact on s7, s42, t5, full; medians 0.2075 s vs 0.2068 s, a few lines l
 
 ## Round 11: less code
 Dist::set and the unused new() argument went; the POP switch went. rustfmt lines 515 -> 501. Exact on s7, s42, t5, full. (Dropping the BFS relabel instead would cut ~40 lines but costs +48% time: 0.203 -> 0.301 s.)
+
+## Round 12: clear only the used slots
+A table grown by one big search (64K-128K slots) was refilled on every query though most searches use a few thousand. Dist now keeps the slots it filled and clears just those when they are under 1/16 of the table. Exact on s7, s42, t5, full; medians 0.2015 -> 0.1974 s.
