@@ -117,14 +117,20 @@ fn main() {
     // one name table shared by all threads, filled with CAS. A slot is
     // tag << 48 | len << 32 | (offset + 1), where offset and len point into `body`.
     // The slot index is the name's id, and each country keeps an atomic bitset of ids.
-    let table: Vec<AtomicU64> = (0..SLOTS).map(|_| AtomicU64::new(0)).collect();
+    // Both come as untouched zero pages, in 4 KB pages (a 2 MB page would be charged whole the
+    // moment any thread touches it), and each thread faults in its own share before any record
+    // is read, instead of the main thread zeroing 5 MB alone.
+    let table: Vec<AtomicU64> = zeroed(SLOTS);
     let words = SLOTS / 64;
-    let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
+    let seen: Vec<AtomicU64> = zeroed(ng * words);
+    let ready = std::sync::Barrier::new(nt);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt).map(|_| {
-            let (lookup, table, seen, cuts, next) = (&lookup, &table, &seen, &cuts, &next);
+        let hs: Vec<_> = (0..nt).map(|k| {
+            let (lookup, table, seen, cuts, next, ready) = (&lookup, &table, &seen, &cuts, &next, &ready);
             sc.spawn(move || {
+                for t in [table, seen] { for x in &t[t.len() * k / nt..t.len() * (k + 1) / nt] { x.store(0, Relaxed); } }
+                ready.wait();
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
                 let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
@@ -206,6 +212,16 @@ fn main() {
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/aggregates.txt"), o).unwrap();
     std::process::exit(0);
+}
+
+// n zeroed atomics straight from calloc (fresh pages, nothing written yet), asked for 4 KB pages
+fn zeroed<T>(n: usize) -> Vec<T> {
+    extern "C" { fn madvise(a: *const u8, l: usize, advice: i32) -> i32; }
+    let l = std::alloc::Layout::array::<T>(n.max(1)).unwrap();
+    let p = unsafe { std::alloc::alloc_zeroed(l) };
+    let (a, e) = ((p as usize + 4095) & !4095, (p as usize + l.size()) & !4095);
+    if a < e { unsafe { madvise(a as *const u8, e - a, 15) }; } // MADV_NOHUGEPAGE
+    unsafe { Vec::from_raw_parts(p as *mut T, n, n.max(1)) }
 }
 
 // read-only mmap of an input file, so nothing is copied and nothing is charged to our heap
