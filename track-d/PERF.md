@@ -63,3 +63,8 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Next ideas
 
 A hash based distance map per thread to cut memory, and a faster integer parser.
+
+## Round 9: prune pushes against the other frontier
+A relaxed node is only pushed when nd + (other side's heap min) < best: any rest of the path
+from v costs at least that frontier, and if the other side already reached v, best was updated
+just before. Exact on s7, s42, t5, full. Local medians 0.2222 s -> 0.2183 s (-1.8%).

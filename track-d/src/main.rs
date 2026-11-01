@@ -285,6 +285,7 @@ fn main() {
                             let (Some(tf), Some(tb)) = (tf, tb) else { break };
                             if tf.saturating_add(tb) >= best { break; }
                             let side = if heap[0].len() <= heap[1].len() { 0 } else { 1 };
+                            let lim = if side == 0 { tb } else { tf };
                             let (d, u) = heap[side].pop();
                             if d > dist[side].get(u) { continue; }
                             let (o, a) = g[side];
@@ -298,9 +299,10 @@ fn main() {
                                 if nd < dv {
                                     if dv == u64::MAX { touched[side].push(v); }
                                     mine.set_at(i, v, nd);
-                                    heap[side].push(nd, v);
                                     let ov = other.get(v);
                                     if ov != u64::MAX && nd + ov < best { best = nd + ov; }
+                                    // anything left from v to the other end costs at least the other frontier
+                                    if nd + lim < best { heap[side].push(nd, v); }
                                 }
                             }
                         }

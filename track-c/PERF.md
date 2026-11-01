@@ -64,3 +64,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 ## Next ideas
 
 The per country bitsets of names seen are the next cost: one atomic OR per record into 8 MB.
+
+## Round 10: dynamic chunks (reverted)
+Eight pieces per thread pulled from an atomic counter instead of one fixed slice each: medians
+0.0538 s both ways, peak unchanged. The fixed split is already balanced, so it stays.
