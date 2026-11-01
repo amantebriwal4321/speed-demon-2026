@@ -59,3 +59,6 @@ Radix sort per hour, and a faster integer formatter for the output.
 
 ## Round 13: less code
 Endpoint bytes are compared in the mmap instead of a copied arena (arena, aoff and eq gone); the POP mmap switch is gone. rustfmt lines 420 -> 397. Exact on s7, s42, t3, t5, full; medians 0.0425 -> 0.0400 s, peak 15 MB both.
+
+## Round 14: plain sort for percentiles
+Groups average about 25 rows (3.1M rows, 127k output lines), so three select_nth passes buy nothing over one sort_unstable. rustfmt lines 397 -> 369. Exact on s7, s42, t3, t5, full; medians equal across four paired runs.

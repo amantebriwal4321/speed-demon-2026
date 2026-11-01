@@ -185,24 +185,9 @@ fn main() {
                         let grp = &mut buf[s..t];
                         let n = grp.len();
                         let errs = std::mem::take(&mut errv[g]);
-                        // nearest rank percentiles: three selections, each on the part right of
-                        // the one before, instead of a full sort
-                        let (r50, r95, r99) = ((50 * n + 99) / 100 - 1, (95 * n + 99) / 100 - 1, (99 * n + 99) / 100 - 1);
-                        let (p50, p95, p99);
-                        if n <= 24 {
-                            grp.sort_unstable();
-                            (p50, p95, p99) = (grp[r50], grp[r95], grp[r99]);
-                        } else {
-                            let (_, &mut a, rest) = grp.select_nth_unstable(r50);
-                            p50 = a;
-                            let rest = &mut rest[..];
-                            let off = r50 + 1;
-                            let (_, &mut b2, rest2) = rest.select_nth_unstable(r95 - off);
-                            p95 = b2;
-                            let off2 = r95 + 1;
-                            p99 = if r99 == r95 { b2 } else { let (_, &mut c2, _) = rest2.select_nth_unstable(r99 - off2); c2 };
-                        }
-                        let pc = |p: usize| (match p { 50 => p50, 95 => p95, _ => p99 }) as u64;
+                        // nearest rank percentiles; groups average about 25 rows, so a plain sort
+                        grp.sort_unstable();
+                        let pc = |p: usize| grp[(p * n + 99) / 100 - 1] as u64;
                         o.extend_from_slice(&hdr);
                         o.extend_from_slice(all[g]);
                         for x in [n as u64, pc(50), pc(95), pc(99), errs, errs * 1_000_000 / n as u64] { o.push(b' '); num(&mut o, x); }
