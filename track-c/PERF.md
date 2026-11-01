@@ -17,6 +17,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 10 | rounds 15-16: region lookup as a rank query, seen bit read before the OR | run-9e2e34661d58 | 0.054 | 9 | 72.78 |
 | 11 | round 17: SWAR region ids, inline BOM test | run-0f63d861248c | 0.050 | 10 | 73.66 |
 | 12 | round 18: field() inlined | run-28ba62db2b47 | 0.047 | 9 | 74.30 |
+| 13 | rounds 21-26: seen word prefetched for writing, names hashed a word at a time, page tables dropped per piece, glibc linked statically, pieces handed out as threads come free | run-7e61367059c9 | 0.0385 | 9 | 76.26 |
 
 ## Step 1: why it got faster
 

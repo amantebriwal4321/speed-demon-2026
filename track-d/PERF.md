@@ -17,6 +17,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 10 | rounds 21-22: number parser, radix fill and set_at inlined | run-83d7b5a8003b | 0.230 | 92 | 63.97 |
 | 11 | round 23: pushes prefetch the node offsets | run-c29392d5df70 | 0.224 | 90 | 64.35 |
 | 12 | rounds 24-25: look-ahead prefetch in the relabel and the BFS | run-d3a4cf6ff601 | 0.220 | 87 | 64.52 |
+| 13 | rounds 27-30: longest-first order out again, page tables dropped per thread, glibc linked statically, parse buckets sized up front | run-4b0234285e75 | 0.210 | 87 | 65.00 |
 
 ## Step 1: why it got faster
 
