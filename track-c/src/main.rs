@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::collections::VecDeque;
 use std::io::Write;
 
 // FxHash-style hash of a byte string, eight bytes at a time
@@ -13,14 +12,7 @@ fn fx(b: &[u8]) -> u64 {
 
 #[derive(Clone, Copy)]
 struct Agg { count: u64, id_sum: i64, sum: i64, min: i64, max: i64, name_bytes: u64, note_bytes: u64 }
-impl Agg {
-    fn new() -> Self { Agg { count: 0, id_sum: 0, sum: 0, min: i64::MAX, max: i64::MIN, name_bytes: 0, note_bytes: 0 } }
-    fn merge(&mut self, x: &Agg) {
-        (self.count, self.id_sum, self.sum) = (self.count + x.count, self.id_sum + x.id_sum, self.sum + x.sum);
-        (self.min, self.max) = (self.min.min(x.min), self.max.max(x.max));
-        (self.name_bytes, self.note_bytes) = (self.name_bytes + x.name_bytes, self.note_bytes + x.note_bytes);
-    }
-}
+impl Agg { fn new() -> Self { Agg { count: 0, id_sum: 0, sum: 0, min: i64::MAX, max: i64::MIN, name_bytes: 0, note_bytes: 0 } } }
 
 // index of the first byte equal to `c`: SSE2, 16 bytes at a time, then eight at a time near the end
 #[inline]
@@ -117,23 +109,9 @@ fn main() {
                 let c = body;
                 let mut agg = vec![Agg::new(); ng];
                 let mut i = lo;
-                // records in flight, so their cache misses overlap the parsing of the records
-                // after them: when record k is parsed, its region lookup and name slot are
-                // prefetched; record k-1 then gets its country, its aggregate and a prefetch of
-                // its seen word; record k-5 goes into the name table and sets its seen bit.
-                let (mut p1, mut p2) = (None::<Rec>, VecDeque::new());
-                let mut stage = |r: Option<Rec>| {
-                    if let Some(q) = p1.take() {
-                        let g = *lookup.get(q.rid).unwrap_or(&unm) as usize;
-                        agg[g].merge(&q.agg);
-                        prefetch(&seen[g * words + q.j / 64]);
-                        p2.push_back((g, q.me, q.j));
-                        if p2.len() > 4 { let (g, me, j) = p2.pop_front().unwrap(); insert(table, seen, g, me, j); }
-                    } else { for (g, me, j) in p2.drain(..) { insert(table, seen, g, me, j); } }
-                    p1 = r;
-                };
+                let (mut pg, mut pme, mut pj) = (usize::MAX, 0u64, 0usize);
                 while i < hi {
-                    if c[i] == BOM[0] && c[i + 1] == BOM[1] && c[i + 2] == BOM[2] { i += 3; }
+                    if c[i..].starts_with(BOM) { i += 3; }
                     let id = dig(c, &mut i) as i64;
                     i += 1;
                     let (ns, ne, nl) = field(c, &mut i);
@@ -149,19 +127,29 @@ fn main() {
                     if c[i] == b'\r' { i += 1; }
                     i += 1;
                     if neg { a = -a; }
+                    let g = if rid < lookup.len() { lookup[rid] } else { unm } as usize;
+                    let x = &mut agg[g];
+                    x.count += 1; x.id_sum += id; x.sum += a;
+                    if a < x.min { x.min = a; }
+                    if a > x.max { x.max = a; }
+                    x.name_bytes += nl; x.note_bytes += tl;
                     let name = &c[ns..ne];
                     let h = fx(name);
                     // names are told apart by a 64 bit hash of their bytes and length; with
                     // 100,000 names a collision has odds near 1 in 10^9
                     let me = ((h ^ name.len() as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
-                    let j = h as usize & (SLOTS - 1);
-                    prefetch(lookup.get(rid).unwrap_or(&unm));
-                    prefetch(&table[j]);
-                    let one = Agg { count: 1, id_sum: id, sum: a, min: a, max: a, name_bytes: nl, note_bytes: tl };
-                    stage(Some(Rec { agg: one, rid, me, j }));
+                    let j0 = h as usize & (SLOTS - 1);
+                    // prefetch this record's slot and seen word, then insert the previous record,
+                    // so the two cache misses overlap the parse of the next record
+                    unsafe {
+                        use std::arch::x86_64::*;
+                        _mm_prefetch(table.as_ptr().add(j0) as *const i8, _MM_HINT_T0);
+                        _mm_prefetch(seen.as_ptr().add(g * words + j0 / 64) as *const i8, _MM_HINT_T0);
+                    }
+                    if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
+                    pg = g; pme = me; pj = j0;
                 }
-                stage(None); // the last record's country
-                stage(None); // and every insert still waiting
+                if pg != usize::MAX { insert(table, seen, pg, pme, pj); }
                 agg
             })
         }).collect();
@@ -169,7 +157,14 @@ fn main() {
     });
 
     let mut total = vec![Agg::new(); ng];
-    for a in &aggs { for g in 0..ng { total[g].merge(&a[g]); } }
+    for a in &aggs {
+        for g in 0..ng {
+            let (t, x) = (&mut total[g], &a[g]);
+            t.count += x.count; t.id_sum += x.id_sum; t.sum += x.sum;
+            t.min = t.min.min(x.min); t.max = t.max.max(x.max);
+            t.name_bytes += x.name_bytes; t.note_bytes += x.note_bytes;
+        }
+    }
     let distinct: Vec<u64> = (0..ng).map(|g| seen[g * words..(g + 1) * words].iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()).collect();
 
     let money = |v: i64| format!("{}{}.{:02}", if v < 0 { "-" } else { "" }, v.abs() / 100, v.abs() % 100);
@@ -194,12 +189,6 @@ fn map(path: &str) -> &'static [u8] {
     if len == 0 { return &[]; }
     unsafe { std::slice::from_raw_parts(mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0), len) }
 }
-
-// a parsed record waiting for its country
-struct Rec { agg: Agg, rid: usize, me: u64, j: usize }
-
-#[inline(always)]
-fn prefetch<T>(x: &T) { unsafe { std::arch::x86_64::_mm_prefetch(x as *const T as *const i8, std::arch::x86_64::_MM_HINT_T0) } }
 
 const SLOTS: usize = 1 << 17; // the name pool is 100,000 per the spec, so the table stays under 0.77 full
 const WORDS: usize = SLOTS / 64;
