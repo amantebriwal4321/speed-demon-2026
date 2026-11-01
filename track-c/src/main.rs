@@ -1,13 +1,18 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::io::Write;
 
-// FxHash-style hash of a byte string, eight bytes at a time
-fn fx(b: &[u8]) -> u64 {
-    let mut h = 0u64;
-    let mut c = b.chunks_exact(8);
-    for x in &mut c { h = (h.rotate_left(5) ^ u64::from_le_bytes(x.try_into().unwrap())).wrapping_mul(0x517cc1b727220a95); }
-    for &x in c.remainder() { h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x517cc1b727220a95); }
-    h
+// FxHash-style hash of b[s..e], eight bytes at a time: a string of up to 8 bytes is one word
+// with the bytes past its end cleared, a longer one its 8 byte chunks and then its last 8 bytes.
+// A name is always followed by at least 8 more bytes of its record, so reading 8 is safe.
+#[inline(always)]
+fn fx(b: &[u8], s: usize, e: usize) -> u64 {
+    let mix = |h: u64, x: u64| (h.rotate_left(5) ^ x).wrapping_mul(0x517cc1b727220a95);
+    let first = u64::from_le_bytes(b[s..s + 8].try_into().unwrap());
+    if e - s <= 8 { return mix(0, first & u64::MAX.checked_shr(64 - 8 * (e - s) as u32).unwrap_or(0)); }
+    let mut h = mix(0, first);
+    let mut k = s + 8;
+    while k + 8 < e { h = mix(h, u64::from_le_bytes(b[k..k + 8].try_into().unwrap())); k += 8; }
+    mix(h, u64::from_le_bytes(b[e - 8..e].try_into().unwrap()))
 }
 
 #[derive(Clone, Copy)]
@@ -144,12 +149,11 @@ fn main() {
                     if a < x.min { x.min = a; }
                     if a > x.max { x.max = a; }
                     x.name_bytes += nl; x.note_bytes += tl;
-                    let name = &c[ns..ne];
-                    let h = fx(name);
+                    let h = fx(c, ns, ne);
                     // names are told apart by a 64 bit hash of their bytes and length; with
                     // 100,000 names a collision has odds near 1 in 10^9
-                    let me = ((h ^ name.len() as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
-                    let j0 = h as usize & (SLOTS - 1);
+                    let me = ((h ^ (ne - ns) as u64).wrapping_mul(0x9E3779B97F4A7C15) >> 1) | 1;
+                    let j0 = (h >> (64 - SLOTS.trailing_zeros())) as usize; // the high bits, the best mixed
                     // prefetch this record's slot and seen word, then insert the previous record,
                     // so the two cache misses overlap the parse of the next record
                     unsafe {
