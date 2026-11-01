@@ -84,3 +84,6 @@ Every edge (parse buckets, both CSRs) is one u32: head in the low vb = ceil(log2
 
 ## Round 14: query-phase memory (not kept)
 Packed 12-byte radix entries: peak 90 -> 89 MB, time same; the heaps are not the peak. Dist tables grown at 3/4 load instead of 1/2: peak 90 -> 84 MB but medians +2-4%, a wash on the score. Both reverted.
+
+## Round 15: stale heap entries
+451,741 of 7,594,508 pops (6%) are stale, so skipping them cannot buy much; not attempted.

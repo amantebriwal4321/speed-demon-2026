@@ -65,3 +65,6 @@ Groups average about 25 rows (3.1M rows, 127k output lines), so three select_nth
 
 ## Round 15: write outside the lock
 The thread that flushed finished hours used to hold the lock through write_all, so every other thread waited to drop its hour off (3-4 ms per thread). Now one thread at a time is the writer: it takes the ready run of hours under the lock, writes them unlocked, then checks again. Exact on s7, s42, t3, t5, full; three paired medians 0.0524/0.0553/0.0507 -> 0.0504/0.0546/0.0494 s (box slower than earlier today), peak 15 MB.
+
+## Round 16: parser profile and tries (not kept)
+Ablations on full: LF walk only 6.5 ms, + field parse ~10 ms, + endpoint lookup ~15 ms (the lookup is the largest parse cost; row pushes are free). Keys inline in the slot table (24 B slots): +1-3%. One-multiply hash: same. Both reverted.
