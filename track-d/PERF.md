@@ -144,3 +144,4 @@ The costliest 10% of the queries do 75% of the work, so one big search started l
 
 ## Round 27: round 26 out (board A/B)
 Round 26 (longest searches first) over 27 board runs: median 0.2279 s, best 0.2127 s. Before it the board had only three runs of the same code (0.2196, 0.2155, 0.2268 s, median 0.2196). Round 26 comes out again so the two can be compared on the same day's runs. Exact on s7, s42, t5, full, h99, h3.
+Board without round 26: run-18a29590e6bd 0.2517 s, run-5125b6840ce9 0.2147 s.

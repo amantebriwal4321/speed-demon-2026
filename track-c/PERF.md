@@ -128,3 +128,4 @@ Board for round 20 (each thread unmaps its part): run-c4d5dfb1a6be 0.0484 s, run
 
 ## Round 24: each thread drops its part's page tables with madvise (board experiment)
 Round 20's idea again, without what made it slow on the board: munmap takes the address-space lock for writing, so a thread that finished early held off the page faults of the threads still parsing. MADV_DONTNEED only takes it for reading, like a page fault, and drops the same page table entries (the file stays in the page cache), so the exit no longer tears down the 200 MB mapping on one thread. Exact on s7, s42, t5, full, h99, h3. 21 alternating runs: 116.3 -> 113.4 ms at 4 threads, 119.2 -> 117.1 ms with 12 forced; the board decides.
+Board: run-ec061f0e5e7d 0.0393 s, 9.7 MB, 75.87 points, a new best (from 74.92), rank 31 -> 27 of 109.
