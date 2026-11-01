@@ -95,3 +95,6 @@ Round 13 alone on the board: run-2c942fe50715, 0.0592 s, 10.9 MB (from 12.8), 71
 
 ## Round 15: region lookup as a rank query
 The region table was 2 MB indexed by region id (ids up to 999,999, 200,000 present), read once per record at random. It is now a bitset of the ids present, with the count of ids before each 64-bit word stored next to the word, and the countries in id order (regions.csv lists ids ascending): a lookup is a bit test plus a popcount, in 0.6 MB that stays in cache. 12-thread peak 8 -> 7 MB; 21 alternating runs: 0.153 -> 0.140 s at 4 threads, 0.156 -> 0.147 s with 12. Exact on s7, s42, t5, full.
+
+## Round 16: read the seen bit before setting it
+Every record did an atomic OR on its (country, name) bit. With 12 threads the lines of the popular countries move between cores on every OR, even when the bit is already set, which it is for every repeat of a pair. The bit is now read first and only ORed when clear, so a repeat leaves the line shared. Locally (4 cores, no SMT) this is neutral, 21 alternating runs at 4 and at 12 threads within 1-4%; it is aimed at the board's 6 cores. Exact on s7, s42, t5, full.

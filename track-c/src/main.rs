@@ -212,7 +212,9 @@ fn insert(table: &[AtomicU64], seen: &[AtomicU64], g: usize, me: u64, mut j: usi
         if cur == 0 { match table[j].compare_exchange(0, me, Relaxed, Relaxed) { Ok(_) => break, Err(v) if v == me => break, Err(_) => {} } }
         j = (j + 1) & (SLOTS - 1);
     }
-    seen[g * WORDS + j / 64].fetch_or(1 << (j % 64), Relaxed);
+    // a pair seen before is only read: the line stays shared instead of moving between cores
+    let w = &seen[g * WORDS + j / 64];
+    if w.load(Relaxed) >> (j % 64) & 1 == 0 { w.fetch_or(1 << (j % 64), Relaxed); }
 }
 
 // the digits at b[*i..], leaving *i on the first non digit: 8 bytes at once with SWAR, the
