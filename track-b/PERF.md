@@ -83,3 +83,12 @@ and the fill writes those into shared atomic bitsets instead of lists (10.1M of 
 Exact after fixing an overflow in the big-query test. But the peak stayed at 122 MB (it sits in
 the scan phase, where the u16 blocks hold every posting) and medians went 0.305 s -> 0.312 s.
 Kept in /workspace/b-rewrite only. To cut the peak, the scan itself has to stop emitting dense postings.
+
+## Round 11: common terms skip the lists in the first pass
+A 256 KB sample of docs.txt picks the terms in over 1 doc in 48 (a margin under the 1 in 32
+line); the last line gives the max doc id, so their bitsets exist before the scan. Their table
+value becomes 1<<31 | slot, so the scan ORs a bit into a local 64-doc word per term, flushed
+with one fetch_or per word, and never writes a posting or touches last[] for them. Any choice of
+terms is exact, the sample only steers memory. Exact on s7, s42, t5, full.
+Local: anon peak 120 MB -> 103 MB, medians 0.304 s vs 0.307 s (within noise).
+Atomic fetch_or per posting was +16%, and keeping the bslot side lookup was +5%.

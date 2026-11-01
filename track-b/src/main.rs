@@ -214,16 +214,56 @@ fn main() {
     // per thread: a doc list for every query term, plus the chunk's token stream as term ids
     // (u32::MAX for tokens no query uses) with each doc's start, so phrases are checked
     // by comparing ints. Chunks are in file order, so each part covers one doc range.
-    let parts: Vec<Part> = std::thread::scope(|sc| {
+    // doc ids run in file order, so the last line gives the bitset size up front
+    let maxdoc = { let t = docs.len().saturating_sub(1); let s0 = docs[..t].iter().rposition(|&c| c == b'\n').map_or(0, |x| x + 1);
+        let mut v = 0usize; for &c in &docs[s0..] { if c == b'\t' { break; } v = v * 10 + (c - b'0') as usize; } v };
+    let nw = maxdoc / 64 + 1;
+    let use_bits = maxdoc < 1 << 26 && docs.len() > 0;
+    // a 4 MB sample of the docs picks the common terms (over 1 doc in 32); those never get a
+    // list: the scan marks them straight into a bitset, so their postings are never held
+    let mut bslot = vec![u32::MAX; nall];
+    let mut nd = 0usize;
+    if use_bits {
+        let mut e = docs.len().min(1 << 18);
+        while e < docs.len() && docs[e - 1] != b'\n' { e += 1; }
+        let (mut seen, mut c) = (vec![u32::MAX; nall], vec![0u32; nall]);
+        let (mut i, mut nd0) = (0usize, 0u32);
+        while i < e {
+            while docs[i] != b'\t' { i += 1; }
+            nd0 += 1;
+            let mut w = [0u8; 16];
+            loop {
+                while lower[docs[i] as usize] == 0 && docs[i] != b'\n' { i += 1; }
+                if docs[i] == b'\n' { i += 1; break; }
+                let s0 = i;
+                while lower[docs[i] as usize] != 0 { if i - s0 < 16 { w[i - s0] = lower[docs[i] as usize]; } i += 1; }
+                let l = i - s0;
+                if l > 16 { continue; }
+                let mut kk = 0u128; for q in 0..l { kk |= (w[q] as u128) << (8 * q); }
+                let mut j = h(kk);
+                let t = loop { let x = keys[j]; if x == kk { break Some(vals[j]); } if x == 0 { break None; } j = (j + 1) & (cap - 1); };
+                if let Some(t) = t { if seen[t as usize] != nd0 { seen[t as usize] = nd0; c[t as usize] += 1; } }
+            }
+        }
+        // a margin under the 1 in 32 line, since the sample is small
+        for t in 0..nall { if c[t] as u64 * 48 > nd0 as u64 { bslot[t] = nd as u32; nd += 1; } }
+    }
+    let abits: Vec<std::sync::atomic::AtomicU64> = (0..nd * nw).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+    // a common term's table value becomes its bitset slot with the top bit set, so the scan
+    // marks it without touching last[] or a side table
+    for j in 0..cap { if keys[j] != 0 && bslot[vals[j] as usize] != u32::MAX { vals[j] = 1 << 31 | bslot[vals[j] as usize]; } }
+    for v in long.values_mut() { if bslot[*v as usize] != u32::MAX { *v = 1 << 31 | bslot[*v as usize]; } }
+    let scan: Vec<(Part, Vec<Vec<u16>>, Vec<u32>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &docs[cuts[k]..cuts[k + 1]];
             let base = cuts[k];
-            let (keys, vals, long, lower, bk, bv, pf) = (&keys, &vals, &long, &lower, &bk, &bv, &pf);
+            let (keys, vals, long, lower, bk, bv, pf, bslot, abits) = (&keys, &vals, &long, &lower, &bk, &bv, &pf, &bslot, &abits);
             sc.spawn(move || {
                 let mut p = Part { lo: u32::MAX, lists: Vec::new(), loff: Vec::new(), doff: Vec::new() };
                 let mut last = vec![u32::MAX; nall];
                 let mut cnt = vec![0u32; nall + 1];
                 let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
+                let (mut acc, mut aw) = (vec![0u64; nd], 0usize);
                 let mut i = 0;
                 while i < c.len() {
                     let mut doc = 0u32;
@@ -236,10 +276,13 @@ fn main() {
                     blk.push(u16::MAX);
                     p.doff.push((base + i) as u32);
                     let d = p.doff.len() as u32 - 1;
+                    // common terms gather 64 docs of bits locally, then one OR per word goes out
+                    let g = (p.lo + d) as usize >> 6;
+                    if g != aw { for (x, a) in acc.iter_mut().enumerate() { if *a != 0 { abits[x * nw + aw].fetch_or(std::mem::take(a), Ordering::Relaxed); } } aw = g; }
                     i += 1;
                     macro_rules! handle { ($id:expr) => {{ let id: Option<u32> = $id;
                         if let Some(t) = id {
-                            if last[t as usize] != d { last[t as usize] = d; put(&mut blk, t); cnt[t as usize + 1] += 1; }
+                            if t >> 31 == 1 { acc[(t & 0x7FFF_FFFF) as usize] |= 1 << ((p.lo + d) & 63); } else if last[t as usize] != d { last[t as usize] = d; { put(&mut blk, t); cnt[t as usize + 1] += 1; } }
                             if false && prev != u32::MAX {
                                 let k = (prev as u64 + 1) << 32 | t as u64;
                                 let f = (k.wrapping_mul(0xC2B2AE3D27D4EB4F) >> 44) as usize;
@@ -289,7 +332,19 @@ fn main() {
                     }
                     i += 1;
                 }
+                for (x, a) in acc.iter_mut().enumerate() { if *a != 0 { abits[x * nw + aw].fetch_or(*a, Ordering::Relaxed); } }
                 blocks.push(blk);
+                (p, blocks, cnt)
+            })
+        }).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    // terms in more than 1 doc in 32 go straight into a bitset of all docs and get no list,
+    // which leaves out nearly half the postings
+    let parts: Vec<Part> = std::thread::scope(|sc| {
+        let hs: Vec<_> = scan.into_iter().map(|(mut p, blocks, mut cnt)| {
+            let (bslot, abits) = (&bslot, &abits);
+            sc.spawn(move || {
                 for t in 0..nall { cnt[t + 1] += cnt[t]; }
                 let mut cur = cnt.clone();
                 let mut lists = vec![0u32; cnt[nall] as usize];
@@ -315,25 +370,8 @@ fn main() {
 
     // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
     // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
-    let maxdoc = parts.iter().filter_map(|p| (!p.doff.is_empty()).then(|| p.lo + p.doff.len() as u32 - 1)).max().unwrap_or(0) as usize;
-    let nw = maxdoc / 64 + 1;
-    let use_bits = maxdoc < 1 << 26;
-    // terms in more than 1 doc in 32 also get a ready made bitset (a few MB in all), so an op
-    // on them is a word wise pass instead of a walk over a long list
-    let tlen = |t: usize| parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>();
-    let dense: Vec<u32> = if use_bits { (0..nall).filter(|&t| tlen(t) > 2 * nw).map(|t| t as u32).collect() } else { Vec::new() };
-    let mut bslot = vec![u32::MAX; nall];
-    for (i, &t) in dense.iter().enumerate() { bslot[t as usize] = i as u32; }
-    let mut bits = vec![0u64; dense.len() * nw];
-    std::thread::scope(|sc| {
-        let per = dense.len().div_ceil(nt).max(1);
-        for (ch, ts) in bits.chunks_mut(per * nw).zip(dense.chunks(per)) {
-            let parts = &parts;
-            sc.spawn(move || for (b, &t) in ch.chunks_mut(nw).zip(ts) {
-                for p in parts { for &d in dl(p, t) { b[d as usize >> 6] |= 1 << (d & 63); } }
-            });
-        }
-    });
+    let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
+    let tlen = |t: usize| if bslot[t] != u32::MAX { 4 * nw } else { parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>() };
     let bs = |t: u32| { let i = bslot[t as usize]; (i != u32::MAX).then(|| &bits[i as usize * nw..(i as usize + 1) * nw]) };
     let psum: Vec<u64> = (0..256u32).map(|b| (0..8).filter(|i| b >> i & 1 == 1).sum::<u32>() as u64).collect();
     let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len()).map(|_| Default::default()).collect();
@@ -350,7 +388,7 @@ fn main() {
                 // only the count, the sum and the first ten ids are printed
                 let (mut cnt, mut sum, mut r) = (0usize, 0u64, Vec::with_capacity(10));
                 let big = use_bits && match &qs[k] {
-                    Q::Bool(v) => v.iter().map(|&(_, t)| parts.iter().map(|p| dl(p, t).len()).sum::<usize>()).sum::<usize>() > 2 * nw,
+                    Q::Bool(v) => v.iter().map(|&(_, t)| tlen(t as usize)).sum::<usize>() > 2 * nw,
                     _ => false,
                 };
                 if big {
@@ -401,9 +439,14 @@ fn main() {
                         Q::Phrase((ts, ks)) => {
                             // docs holding every term, then the doc text decides
                             let mut order: Vec<u32> = ts.clone(); order.sort_unstable(); order.dedup();
-                            order.sort_by_key(|&t| dl(p, t).len());
-                            let mut hit = dl(p, order[0]).to_vec();
-                            for &t in &order[1..] { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
+                            let (dn, ld): (Vec<u32>, Vec<u32>) = order.iter().partition(|&&t| bslot[t as usize] != u32::MAX);
+                            let mut ld = ld; ld.sort_by_key(|&t| dl(p, t).len());
+                            let mut hit = if let Some(&t0) = ld.first() { dl(p, t0).to_vec() } else {
+                                let hi = p.lo as usize + p.doff.len();
+                                (p.lo as usize..hi).filter(|&d| { let d = d as u32; dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1) }).map(|d| d as u32).collect()
+                            };
+                            for &t in ld.iter().skip(1) { if hit.is_empty() { break; } hit = and(&hit, dl(p, t)); }
+                            if !ld.is_empty() { hit.retain(|&d| dn.iter().all(|&t| bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1)); }
                             if ts.len() > 1 { let short = ks.iter().all(|&k| k >> 127 == 0); hit.retain(|&d| { let at = p.doff[(d - p.lo) as usize] as usize; if short { has2(docs, at, ks, &lower) } else { has(docs, at, ks) } }); }
                             add(&mut cnt, &mut sum, &mut r, &hit);
                         }
