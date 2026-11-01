@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
@@ -75,7 +76,7 @@ impl Dist {
     }
 }
 
-struct Ptr2(*mut (u32, u32));
+struct Ptr2(*mut u32);
 unsafe impl Sync for Ptr2 {}
 
 fn cuts(b: &[u8], nt: usize) -> Vec<usize> {
@@ -103,28 +104,39 @@ fn main() {
     // parse in parallel, sorting each edge into a bucket by its tail's node range; then each
     // bucket's thread builds the CSR for its own node range, with no atomics
     // bucket of node a is a * nt / n, so bucket b holds nodes ceil(b * n / nt) .. ceil((b + 1) * n / nt)
+    // an edge is one u32: head in the low vb bits, weight above it. A weight that does not fit
+    // (0.07% of them) is stored as all ones there, with the true one in `big` by (tail, head);
+    // parallel big edges keep the smallest, the only one a shortest path can use
+    let vb = 32 - (n.max(2) as u32 - 1).leading_zeros();
+    let (vm, esc) = ((1u32 << vb) - 1, u32::MAX >> vb);
+    let pk = |v: u32, w: u32| w.min(esc) << vb | v;
     let range = |b: usize| ((b * n + nt - 1) / nt, ((b + 1) * n + nt - 1) / nt);
-    let parts: Vec<Vec<Vec<[u32; 3]>>> = std::thread::scope(|sc| {
+    let parts: Vec<(Vec<Vec<u64>>, HashMap<(u32, u32), u32>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt).map(|k| {
             let c = &body[ct[k]..ct[k + 1]];
             sc.spawn(move || {
                 let mut v = vec![Vec::with_capacity(c.len() / 15 / nt + 16); nt];
+                let mut big: HashMap<(u32, u32), u32> = HashMap::new();
                 let mut j = 0;
                 while j < c.len() {
                     let (a, b, w) = (num(c, &mut j), num(c, &mut j), num(c, &mut j));
-                    if a != b { v[(a as u64 * nt as u64 / n as u64) as usize].push([a, b, w]); } // self loops never help
+                    if a == b { continue; } // self loops never help
+                    v[(a as u64 * nt as u64 / n as u64) as usize].push((a as u64) << 32 | pk(b, w) as u64);
+                    if w >= esc { let x = big.entry((a, b)).or_insert(w); *x = (*x).min(w); }
                 }
-                v
+                (v, big)
             })
         }).collect();
         hs.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    let sizes: Vec<usize> = (0..nt).map(|b| parts.iter().map(|p| p[b].len()).sum()).collect();
+    let sizes: Vec<usize> = (0..nt).map(|b| parts.iter().map(|p| p.0[b].len()).sum()).collect();
+    let mut big: HashMap<(u32, u32), u32> = HashMap::new();
+    for (_, m) in &parts { for (&k, &w) in m { let x = big.entry(k).or_insert(w); *x = (*x).min(w); } }
     let total: usize = sizes.iter().sum();
     let mut off = vec![0u32; n + 1];
-    let mut adj: Vec<u64> = vec![0; total];
+    let mut adj: Vec<u32> = vec![0; total];
     {
-        let (mut orest, mut arest): (&mut [u32], &mut [u64]) = (&mut off[..n], &mut adj);
+        let (mut orest, mut arest): (&mut [u32], &mut [u32]) = (&mut off[..n], &mut adj);
         let mut jobs = Vec::new();
         let mut base = 0u32;
         for b in 0..nt {
@@ -137,13 +149,13 @@ fn main() {
             for (b, lo, o, a, base) in jobs {
                 let parts = &parts;
                 sc.spawn(move || {
-                    for p in parts { for e in &p[b] { o[e[0] as usize - lo] += 1; } }
+                    for p in parts { for e in &p.0[b] { o[(e >> 32) as usize - lo] += 1; } }
                     let mut acc = 0u32;
                     for x in o.iter_mut() { let d = *x; *x = acc; acc += d; }
                     let mut cur: Vec<u32> = o.to_vec();
-                    for p in parts { for e in &p[b] {
-                        let s = &mut cur[e[0] as usize - lo];
-                        a[*s as usize] = (e[1] as u64) << 32 | e[2] as u64; *s += 1;
+                    for p in parts { for e in &p.0[b] {
+                        let s = &mut cur[(e >> 32) as usize - lo];
+                        a[*s as usize] = *e as u32; *s += 1;
                     } }
                     for x in o.iter_mut() { *x += base; }
                 });
@@ -170,7 +182,7 @@ fn main() {
                     while h < ord.len() {
                         let u = ord[h] as usize; h += 1;
                         for e in &adj[off[u] as usize..off[u + 1] as usize] {
-                            let v = (e >> 32) as usize;
+                            let v = (e & vm) as usize;
                             if owner[v].load(Relaxed) == u32::MAX && claim(v) { ord.push(v as u32); }
                         }
                     }
@@ -199,11 +211,11 @@ fn main() {
     });
     for k in 0..n { noff[k + 1] += noff[k]; }
     let newid: Vec<u32> = newid.into_iter().map(|x| x.into_inner()).collect();
-    let mut nadj: Vec<(u32, u32)> = Vec::with_capacity(total);
+    let mut nadj: Vec<u32> = Vec::with_capacity(total);
     unsafe { nadj.set_len(total) }; // every slot is written below
     {
         let chunk = (n + nt - 1) / nt;
-        let mut rest: &mut [(u32, u32)] = &mut nadj;
+        let mut rest: &mut [u32] = &mut nadj;
         let mut slices = Vec::new();
         for k in 0..nt {
             let (lo, hi) = ((k * chunk).min(n), ((k + 1) * chunk).min(n));
@@ -219,7 +231,7 @@ fn main() {
                         let u = order[k] as usize;
                         for e in &adj[off[u] as usize..off[u + 1] as usize] {
                             let x = *e;
-                            s[p] = (newid[(x >> 32) as usize], x as u32); p += 1;
+                            s[p] = x & !vm | newid[(x & vm) as usize]; p += 1;
                         }
                     }
                 });
@@ -234,14 +246,14 @@ fn main() {
     std::thread::scope(|sc| {
         for k in 0..nt {
             let (adj, rdeg) = (&adj, &rdeg);
-            sc.spawn(move || for e in &adj[(k * per).min(total)..((k + 1) * per).min(total)] { rdeg[e.0 as usize].fetch_add(1, Relaxed); });
+            sc.spawn(move || for e in &adj[(k * per).min(total)..((k + 1) * per).min(total)] { rdeg[(e & vm) as usize].fetch_add(1, Relaxed); });
         }
     });
     let mut roff = vec![0u32; n + 1];
     for k in 0..n { roff[k + 1] = roff[k] + rdeg[k].load(Relaxed); }
     drop(rdeg);
     let rcur: Vec<AtomicU32> = roff[..n].iter().map(|&x| AtomicU32::new(x)).collect();
-    let mut radj: Vec<(u32, u32)> = Vec::with_capacity(total);
+    let mut radj: Vec<u32> = Vec::with_capacity(total);
     unsafe { radj.set_len(total) };
     let rp = Ptr2(radj.as_mut_ptr());
     std::thread::scope(|sc| {
@@ -249,9 +261,9 @@ fn main() {
         for k in 0..nt {
             let (adj, off, rcur, rp) = (&adj, &off, &rcur, &rp);
             sc.spawn(move || for u in (k * chunk).min(n)..((k + 1) * chunk).min(n) {
-                for &(v, w) in &adj[off[u] as usize..off[u + 1] as usize] {
-                    let s = rcur[v as usize].fetch_add(1, Relaxed);
-                    unsafe { *rp.0.add(s as usize) = (u as u32, w) };
+                for &x in &adj[off[u] as usize..off[u + 1] as usize] {
+                    let s = rcur[(x & vm) as usize].fetch_add(1, Relaxed);
+                    unsafe { *rp.0.add(s as usize) = x & !vm | u as u32 };
                 }
             });
         }
@@ -262,6 +274,7 @@ fn main() {
     let mut qs = Vec::new();
     let mut j = 0;
     while j < q.len() { let s = num(q, &mut j); let t = num(q, &mut j); qs.push((newid[s as usize], newid[t as usize])); }
+    let big: HashMap<(u32, u32), u32> = big.into_iter().map(|((a, b), w)| ((newid[a as usize], newid[b as usize]), w)).collect();
     drop(newid);
 
     let ans: Vec<AtomicU64> = (0..qs.len()).map(|_| AtomicU64::new(0)).collect();
@@ -294,7 +307,9 @@ fn main() {
                             let (o, a) = g[side];
                             let [df, db] = &mut dist;
                             let (mine, other) = if side == 0 { (df, &*db) } else { (db, &*df) };
-                            for &(v, w) in &a[o[u as usize] as usize..o[u as usize + 1] as usize] {
+                            for &x in &a[o[u as usize] as usize..o[u as usize + 1] as usize] {
+                                let v = x & vm;
+                                let w = if x >> vb != esc { x >> vb } else { big[&if side == 0 { (u, v) } else { (v, u) }] };
                                 let nd = d + w as u64;
                                 let i = mine.slot(v);
                                 let k = mine.t[i];

@@ -78,3 +78,6 @@ Dist::set and the unused new() argument went; the POP switch went. rustfmt lines
 
 ## Round 12: clear only the used slots
 A table grown by one big search (64K-128K slots) was refilled on every query though most searches use a few thousand. Dist now keeps the slots it filled and clears just those when they are under 1/16 of the table. Exact on s7, s42, t5, full; medians 0.2015 -> 0.1974 s.
+
+## Round 13: 4-byte edges
+Every edge (parse buckets, both CSRs) is one u32: head in the low vb = ceil(log2 n) bits (21 here), weight in the rest. Weights that do not fit (3,496 of 5M, 0.07%) store all ones there and the true weight sits in a map by (tail, head); parallel big edges keep the minimum, the only one a shortest path can use. Parse buckets hold tail << 32 | packed (8 bytes, was 12). Exact on s7, s42, t5, full (which include 0 and 2^32-1 weights and parallel edges). Local anon peak 127 -> 89 MB, medians 0.2056/0.1975 -> 0.1888/0.1858 s.
