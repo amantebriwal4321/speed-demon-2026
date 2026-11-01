@@ -16,7 +16,7 @@ const BLK: usize = 1 << 21; // u16 entries per block, each block sized up front 
 
 struct Part { lo: u32, lists: Vec<u16>, loff: Vec<u32>, doff: Vec<u32> }
 
-enum Q { Bool(Vec<(u8, u32)>), Phrase((Vec<u32>, Vec<&'static [u8]>)) } // op: 0 first, 1 AND, 2 OR, 3 NOT
+enum Q<'a> { Bool(&'a [(u8, u32)]), Phrase(&'a [u32], &'a [&'static [u8]]) } // op: 0 first, 1 AND, 2 OR, 3 NOT
 
 // does sorted b contain x, searching forward from *j (galloping); moves *j along
 fn seek(b: &[u16], j: &mut usize, x: u16) -> bool {
@@ -118,21 +118,22 @@ fn main() {
 
     // queries first: only the terms they use get indexed
     let mut tab = Tab { keys: vec![0; 1 << 12], vals: vec![0; 1 << 12], n: 0, long: HashMap::new() };
-    let mut qs = Vec::new();
+    // the queries, flat: a BOOL query is a range of (op, term) pairs in `ops`, a phrase a range
+    // of terms in `pt` with its words in `pw`, so reading them allocates nothing per query
+    let (mut ops, mut pt, mut pw, mut qr) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for line in qb.split(|&c| c == b'\n') {
         if line.is_empty() { continue; }
         if line.starts_with(b"BOOL ") {
-            let w: Vec<&[u8]> = line[5..].split(|&c| c == b' ').collect();
-            let mut v = vec![(0u8, tab.term(w[0]))];
-            for k in (1..w.len()).step_by(2) {
-                let op = match w[k] { b"AND" => 1, b"OR" => 2, _ => 3 };
-                v.push((op, tab.term(w[k + 1])));
+            let (a, mut w) = (ops.len(), line[5..].split(|&c| c == b' '));
+            ops.push((0u8, tab.term(w.next().unwrap())));
+            while let (Some(op), Some(t)) = (w.next(), w.next()) {
+                ops.push((match op { b"AND" => 1, b"OR" => 2, _ => 3 }, tab.term(t)));
             }
-            qs.push(Q::Bool(v));
+            qr.push((true, a, ops.len()));
         } else {
-            let inner = &line[8..line.len() - 1];
-            let w: Vec<&[u8]> = inner.split(|&c| c == b' ').collect();
-            qs.push(Q::Phrase((w.iter().map(|t| tab.term(t)).collect(), w.clone())));
+            let a = pt.len();
+            for t in line[8..line.len() - 1].split(|&c| c == b' ') { pt.push(tab.term(t)); pw.push(t); }
+            qr.push((false, a, pt.len()));
         }
     }
     let nterm = tab.n as usize;
@@ -195,9 +196,9 @@ fn main() {
     for (i, &t) in order.iter().enumerate() { new[t as usize] = i as u32; }
     for j in 0..cap { if keys[j] != 0 { vals[j] = new[vals[j] as usize]; } }
     for v in long.values_mut() { *v = new[*v as usize]; }
-    for q in qs.iter_mut() {
-        match q { Q::Bool(v) => v.iter_mut().for_each(|e| e.1 = new[e.1 as usize]), Q::Phrase((ts, _)) => ts.iter_mut().for_each(|t| *t = new[*t as usize]) }
-    }
+    for e in ops.iter_mut() { e.1 = new[e.1 as usize]; }
+    for t in pt.iter_mut() { *t = new[*t as usize]; }
+    let qs: Vec<Q> = qr.iter().map(|&(b, a, e)| if b { Q::Bool(&ops[a..e]) } else { Q::Phrase(&pt[a..e], &pw[a..e]) }).collect();
     let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
     // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
     // slot holds the whole token and its value and a lookup is one access
@@ -398,9 +399,9 @@ fn main() {
                 // text check, the common ones are tested on their bitsets, the rest are ANDed
                 // shortest first
                 let (mut anchor, mut dn, mut ld) = (0, Vec::new(), Vec::new());
-                if let Q::Phrase((ts, ks)) = &qs[k] {
+                if let Q::Phrase(ts, ks) = &qs[k] {
                     anchor = (0..ts.len()).min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len())).unwrap();
-                    let mut order: Vec<u32> = ts.clone();
+                    let mut order: Vec<u32> = ts.to_vec();
                     order.sort_unstable();
                     order.dedup();
                     (dn, ld) = order.into_iter().partition(|&t| (t as usize) < nd);
@@ -417,7 +418,7 @@ fn main() {
                             }
                             add(&mut cnt, &mut sum, &mut r, &x, p.lo);
                         }
-                        Q::Phrase((ts, ks)) => {
+                        Q::Phrase(ts, ks) => {
                             // docs holding every term, then the doc text decides
                             let hit = &mut x;
                             hit.clear();
