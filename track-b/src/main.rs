@@ -441,7 +441,7 @@ fn main() {
             .map(|(&k, &v)| (k, v)),
     );
     drop((keys, vals));
-    let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
+    let scan: Vec<Vec<Scanned>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
                 let c = &docs[cuts[k]..cuts[k + 1]];
@@ -471,6 +471,12 @@ fn main() {
                     // lists hold doc ids local to their part as u16, so a part closes at 65,535 docs
                     // (a doc count then fits in u16 too, and u16::MAX means "no doc yet")
                     let mut done = Vec::new();
+                    // halfway through a part (by bytes) a new block starts and the term counts so
+                    // far are kept, so the fill can give each half of the part its own thread
+                    let (mut p0, mut half) = (0, None);
+                    let snap = |lc: &Vec<[u16; 2]>, k: usize, d: usize| {
+                        (k, d as u16, lc.iter().map(|e| e[1]).collect::<Vec<u16>>())
+                    };
                     while i < c.len() {
                         let mut doc = 0u32;
                         while c[i] != b'\t' {
@@ -489,16 +495,23 @@ fn main() {
                                     doff: Vec::new(),
                                 },
                             );
-                            done.push((q, std::mem::take(&mut blocks), counts(&mut lc)));
+                            let h = half.take().unwrap_or_else(|| snap(&lc, blocks.len(), 0));
+                            done.push((q, std::mem::take(&mut blocks), counts(&mut lc), h));
+                            p0 = i;
                         }
                         if p.lo == u32::MAX {
                             p.lo = doc;
                         }
                         // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
                         // the fill below can free each block as it goes and the peak stays low
-                        if blk.len() >= BLK {
+                        let mid =
+                            half.is_none() && i - p0 >= (c.len() - p0) / 2 && !p.doff.is_empty();
+                        if blk.len() >= BLK || mid {
                             blocks
                                 .push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
+                        }
+                        if mid {
+                            half = Some(snap(&lc, blocks.len(), p.doff.len()));
                         }
                         blk.push(u16::MAX);
                         p.doff.push((base + i) as u32);
@@ -606,7 +619,8 @@ fn main() {
                         }
                     }
                     blocks.push(blk);
-                    done.push((p, blocks, counts(&mut lc)));
+                    let h = half.unwrap_or_else(|| snap(&lc, blocks.len(), 0));
+                    done.push((p, blocks, counts(&mut lc), h));
                     done
                 })
             })
@@ -626,33 +640,26 @@ fn main() {
         parts.extend(std::thread::scope(|sc| {
             let hs: Vec<_> = now
                 .into_iter()
-                .map(|(mut p, blocks, mut cnt)| {
+                .map(|(mut p, mut blocks, mut cnt, (k, d0, mid))| {
                     sc.spawn(move || {
                         for t in 0..nall {
                             cnt[t + 1] += cnt[t];
                         }
+                        // the first half's postings go after each term's start, the second
+                        // half's after the first half's count: two threads, no overlap
+                        let mut cur: Vec<u32> = (0..nall).map(|t| cnt[t] + mid[t] as u32).collect();
                         let mut lists = vec![0u16; cnt[nall] as usize];
-                        let mut d = u16::MAX;
-                        for b in blocks {
-                            let mut q = 0;
-                            while q < b.len() {
-                                let mut t = b[q] as u32;
-                                q += 1;
-                                if t == 0xFFFF {
-                                    d = d.wrapping_add(1);
-                                    continue;
-                                }
-                                if t == 0xFFFE {
-                                    t = (b[q] as u32) << 16 | b[q + 1] as u32;
-                                    q += 2;
-                                }
-                                lists[cnt[t as usize] as usize] = d;
-                                cnt[t as usize] += 1;
-                            }
+                        let out = Out(lists.as_mut_ptr());
+                        let second = blocks.split_off(k);
+                        std::thread::scope(|s2| {
+                            let (out, first) = (&out, &mut cnt[..nall]);
+                            s2.spawn(move || fill(blocks, u16::MAX, first, out));
+                            fill(second, d0.wrapping_sub(1), &mut cur, out);
+                        });
+                        // the first half's cursors stopped where the second half's started
+                        for t in 0..nall {
+                            cnt[t] -= mid[t] as u32;
                         }
-                        // each start was moved to its term's end, the next term's start: shift back
-                        cnt.rotate_right(1);
-                        cnt[0] = 0;
                         p.lists = lists;
                         p.loff = cnt;
                         p
@@ -1126,6 +1133,34 @@ fn has2(docs: &[u8], start: usize, ks: &[&[u8]], a: usize, lower: &[u8; 256]) ->
                 return false;
             }
             i += 32;
+        }
+    }
+}
+
+// a part's scan: the part, its posting blocks, the doc count of each term (after a leading 0),
+// and where its second half starts: block, doc, and each term's doc count before it
+type Scanned = (Part, Vec<Vec<u16>>, Vec<u32>, (usize, u16, Vec<u16>));
+
+struct Out(*mut u16);
+unsafe impl Sync for Out {}
+
+// each posting of `blocks` goes to its term's cursor in the lists; d is the doc before the first
+fn fill(blocks: Vec<Vec<u16>>, mut d: u16, cur: &mut [u32], out: &Out) {
+    for b in blocks {
+        let mut q = 0;
+        while q < b.len() {
+            let mut t = b[q] as u32;
+            q += 1;
+            if t == 0xFFFF {
+                d = d.wrapping_add(1);
+                continue;
+            }
+            if t == 0xFFFE {
+                t = (b[q] as u32) << 16 | b[q + 1] as u32;
+                q += 2;
+            }
+            unsafe { *out.0.add(cur[t as usize] as usize) = d };
+            cur[t as usize] += 1;
         }
     }
 }
