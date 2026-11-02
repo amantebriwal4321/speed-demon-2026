@@ -236,3 +236,8 @@ Board: run-feaea63b1173 0.2400 s and run-756388053758 0.2421 s, against 0.2336-0
 
 ## Round 47: round 46 out again (board A/B)
 Round 45's scan tables back, to compare with round 46 on runs of the same hour.
+Board: run-9aaf9a38970b 0.2262 s for round 45 in the same hour as round 46's 0.2400 and 0.2421 s. Round 46 stays out: as with round 37, a scan that measures faster on one local core (here -11%) is no faster, or slower, on the scoring box's twelve threads.
+
+## Round 48: tried and not kept (local only)
+- The scan without the per-term "last doc, count" array (`lc`), the fill counting and dropping repeats from the blocks instead (only 0.8% of the listed postings repeat within a doc): scan -5% on one thread, but with 4 threads the scan was flat and the fill's extra pass cost 10-40 ms.
+- Phrase anchors with recorded offsets: each phrase's rarest word in the sample is its anchor, the anchors get ids next to each other, and the scan writes where an anchor first shows up in each doc (and whether it shows up again), so the phrase check looks there instead of searching the doc's text (the check read 438 MB of text over 214,000 candidate docs, for 19,000 matches). Query phase 159 -> 116 ms, total 524 -> 489 ms (-6.5%, 15 alternating runs), exact everywhere, but the sample picks anchors with 1.6 million postings between them (the true rarest words would have 835,000): peak 56 -> 61 MB and 58 more counted lines. With the board's weights (T^0.5, M^0.2, S^0.15) that is about +0.2 points, not worth the code.
