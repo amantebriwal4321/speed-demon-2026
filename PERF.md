@@ -22,9 +22,9 @@ The last night went to different designs rather than tuning, judged on the board
 - B taking the docs a part at a time with every thread on each part, so only one part's postings are ever held: peak 56 -> 31 MB locally and time flat, but on the board 66 -> 56 MB and 11% slower (round 49);
 - B's phrase check starting where a recorded anchor first shows up: -6.5% locally, but 5 MB and 58 lines more, about +0.2 points on paper, so not tried on the board (round 48);
 - A's parse in pieces handed out as threads come free (what helped C): -7% with 12 threads forced locally, no difference on the board (round 35).
-Every one of these also passed the full-scale holdout check below, so the code that stays is the code with the most board evidence behind it.
+All of them were exact on the checks below; what decided was the board, so the code that stays is the code with the most board evidence behind it.
 
-Every change was checked against the published sha256 on seed 1 over 5 runs, against the Python reference on sample data for seeds 7 and 42, on tiny data, and with 1, 3, 5 and 7 threads. Per track steps and reasoning are in each `track-*/PERF.md`.
+Every change was checked against the published sha256 on seed 1 over 5 runs, against the Python reference on sample data for seeds 7 and 42, on tiny data, and with 1, 3, 5 and 7 threads; the final versions of all four also match the reference on a full-scale data set generated with a fresh seed (77). Per track steps and reasoning are in each `track-*/PERF.md`.
 
 ## Formatting
 All four sources are now in rustfmt's default style, the same formatting the board applies before it counts S, so the code reads the way it is measured and S does not change. No code changed: every track is still exact on s7, s42, t5, full, h99 and h3.
