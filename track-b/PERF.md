@@ -16,6 +16,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 9 | rounds 30-32: common-term cutoff 1 in 24 (and waves) | run-14c0632534ec | 0.251 | 67 | 66.25 |
 | 10 | round 32 again (two waves, cutoff 1 in 24) | run-ff5ca3c4b651 | 0.245 | 70 | 66.34 |
 | 11 | rounds 36-42: query terms numbered in a second pass, answers in runs, 1 MB blocks, docs' page tables dropped by the answering threads, glibc linked statically | run-a46587694315 | 0.220 | 67 | 67.42 |
+| 12 | round 45: query temporaries dropped before the scan | run-84d08843293a | 0.2212 | 66.0 | 67.46 |
 
 ## Step 1: why it got faster
 

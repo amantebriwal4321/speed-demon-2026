@@ -14,6 +14,7 @@ Step 1 local numbers came from an 8 thread Linux box. T and M from step 2 on are
 | 7 | rounds 18-21: endpoint text in a per-thread copy, percentiles by selection | run-d9f8db937084 | 0.0360 | 22 | 77.49 |
 | 8 | rounds 23-28: endpoint compare inline, lines written in place, ids through one table, all rows in one reserved mapping, each thread drops its share's page tables | run-68b956798dc8 | 0.0269 | 22 | 79.99 |
 | 9 | rounds 29 and 32: glibc linked statically, p50 selected before p95 and p99 | run-0c2cc394e96e | 0.0255 | 22 | 80.61 |
+| 10 | round 33: the threads' endpoint tables freed before the hours | run-bb9921cb6cae | 0.0257 | 20.6 | 80.79 |
 
 ## Step 1: why it got faster
 
