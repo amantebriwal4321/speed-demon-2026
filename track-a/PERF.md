@@ -143,3 +143,6 @@ Board: run-867136d1be06 0.0262 s, run-0bacecee5c4b 0.0294 s, run-739f5d1b1a55 0.
 
 ## Round 36: round 35 out again (board A/B)
 Round 33's fixed shares back, to compare with round 35 on runs of the same hour.
+
+## Round 37: round 35 back (board A/B)
+Round 35's pieces again, for the second half of the comparison.

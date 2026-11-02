@@ -12,9 +12,9 @@ fn ld8(b: &[u8], i: usize) -> u64 {
 const LAT_ESC: u32 = (1 << 20) - 1;
 
 // Every row lives in one mapping reserved up front: for each hour a region per thread, the
-// hour's regions side by side. A region holds as many rows as its thread's share of the file
-// can have lines, so a thread appends to its own regions with no growth or bounds check, and
-// untouched pages cost nothing. Once an hour's rows are gathered, one madvise hands all its
+// hour's regions side by side. A region has room for twice as many rows as a thread's share
+// of the file can have lines, so a thread appends to its own regions with no growth (a row
+// that would not fit goes to its side rows), and untouched pages cost nothing. Once an hour's rows are gathered, one madvise hands all its
 // pages back, instead of an unmap per block, each of which interrupted every core.
 struct Rows {
     base: *mut u32,
@@ -79,27 +79,30 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(32);
+    // four pieces per thread, handed out as threads come free: on the board two threads share
+    // each core, and one whose neighbour is busier gets through fewer pieces
+    let np = 4 * nt;
     let mut cuts = vec![0usize];
-    for k in 1..nt {
-        let mut p = (b.len() * k / nt).max(*cuts.last().unwrap());
+    for k in 1..np {
+        let mut p = (b.len() * k / np).max(*cuts.last().unwrap());
         while p < b.len() && p > 0 && b[p - 1] != b'\n' {
             p += 1;
         }
         cuts.push(p);
     }
     cuts.push(b.len());
-    // a line is at least 40 bytes
-    let rows = Rows::new(
-        nt,
-        cuts.windows(2).map(|w| w[1] - w[0]).max().unwrap() / 40 + 1,
-    );
+    // a line is at least 40 bytes; a thread's regions have room for twice its share of lines,
+    // and any row past that goes to its side rows
+    let rows = Rows::new(nt, 2 * b.len() / nt / 40 + 1);
     let rows = &rows;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let next = &next;
 
     // per thread: endpoint table, its row count in each hour, and its side rows per hour
     let parts: Vec<(Eps, [usize; HOURS], Vec<Vec<u64>>)> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
-                let (lo, hi) = (cuts[k], cuts[k + 1]);
+                let cuts = &cuts;
                 sc.spawn(move || {
                     let mut e = Eps {
                         slot: vec![u32::MAX; TB],
@@ -109,116 +112,127 @@ fn main() {
                         text: vec![0; 64],
                     };
                     let (mut n, mut side) = ([0usize; HOURS], vec![Vec::new(); HOURS]);
-                    // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
-                    // so finding the next line never waits on parsing this one.
-                    let mut start = lo;
-                    let mut blk = lo;
-                    while blk < hi {
-                        let mut m = if blk + 64 <= b.len() {
-                            lf64(b, blk)
-                        } else {
-                            let mut t = [0u8; 64];
-                            t[..b.len() - blk].copy_from_slice(&b[blk..]);
-                            lf64(&t, 0)
-                        };
-                        if blk + 64 > hi {
-                            m &= (1u64 << (hi - blk)) - 1;
+                    loop {
+                        let p = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if p >= np {
+                            break;
                         }
-                        while m != 0 {
-                            let lf = blk + m.trailing_zeros() as usize;
-                            m &= m - 1;
-                            let j = start;
-                            start = lf + 1;
-                            let c = b;
-                            // 2026-MM-DDTHH: day offset from Oct 30, then the hour
-                            let ts = ld8(c, j + 5); // "MM-DDTHH" at +5 .. +12, little endian
-                            let m1 = (ts >> 8) as u8; // second month digit: '0' for Oct (10), '1' for Nov (11)
-                            let dd = (((ts >> 24) as u8 - b'0') * 10 + ((ts >> 32) as u8 - b'0'))
-                                as usize;
-                            let hh = (((ts >> 48) as u8 - b'0') * 10 + ((ts >> 56) as u8 - b'0'))
-                                as usize;
-                            let day = if m1 == b'0' { dd - 30 } else { dd + 1 };
-                            let hour = day * 24 + hh - 18;
-                            let ml = unsafe {
-                                *mlen.get_unchecked((c[j + 28] as usize) << 8 | c[j + 29] as usize)
-                            } as usize;
-                            let es = j + 29 + ml;
-                            // from the back: latency is at most 10 digits, so the space before it is in
-                            // the last 16 bytes, and the endpoint ends 4 bytes before that space
-                            let sm = sp16(c, lf - 16);
-                            let s4 = lf - 16 + (31 - sm.leading_zeros()) as usize;
-                            let ee = s4 - 4;
-                            let five = c[ee + 1] == b'5';
-                            let nd = lf - s4 - 1; // latency digits, 1 to 10
-                            let v = if nd <= 8 {
-                                // the 8 bytes ending at the LF, junk bytes in front masked off, then SWAR
-                                let x = ld8(c, lf - 8)
-                                    & 0x0F0F0F0F0F0F0F0F
-                                    & (u64::MAX << (8 * (8 - nd)));
-                                let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
-                                let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
-                                (x * 10000 + (x >> 32)) & 0xFFFFFFFF
+                        let (lo, hi) = (cuts[p], cuts[p + 1]);
+                        // walk the LF bits of 64 byte blocks. Each line is parsed from its own two ends,
+                        // so finding the next line never waits on parsing this one.
+                        let mut start = lo;
+                        let mut blk = lo;
+                        while blk < hi {
+                            let mut m = if blk + 64 <= b.len() {
+                                lf64(b, blk)
                             } else {
-                                let mut v = 0u64;
-                                for &d in &c[s4 + 1..lf] {
-                                    v = v * 10 + (d - b'0') as u64;
-                                }
-                                v
+                                let mut t = [0u8; 64];
+                                t[..b.len() - blk].copy_from_slice(&b[blk..]);
+                                lf64(&t, 0)
                             };
-                            let l = ee - es;
-                            let (w0, w1) = if l >= 8 {
-                                (ld8(c, es), ld8(c, ee - 8))
-                            } else {
-                                (ld8(c, es) & ((1u64 << (8 * l)) - 1), 0)
-                            };
-                            let h = ((w0.wrapping_mul(0x9E3779B97F4A7C15)
-                                ^ w1.wrapping_mul(0xC2B2AE3D27D4EB4F)
-                                ^ (l as u64).wrapping_mul(0x165667B19E3779F9))
-                                >> 50) as usize
-                                & (TB - 1);
-                            let mut s = h;
-                            let id = loop {
-                                let x = unsafe { *e.slot.get_unchecked(s) };
-                                if x == u32::MAX {
-                                    let id = e.start.len() as u32;
-                                    // the text keeps 64 zero bytes at its end, so eq() can always read 64 bytes from a start
-                                    e.text.truncate(e.text.len() - 64);
-                                    e.slot[s] = id;
-                                    e.start.push(e.text.len() as u32);
-                                    e.len.push(l as u32);
-                                    e.text.extend_from_slice(&c[es..ee]);
-                                    e.text.extend_from_slice(&[0; 64]);
-                                    e.key.push((w0, w1, l as u32));
-                                    break id;
-                                }
-                                let k = unsafe { e.key.get_unchecked(x as usize) };
-                                if k.0 == w0
-                                    && k.1 == w1
-                                    && k.2 == l as u32
-                                    && (l <= 16
-                                        || eq(&e.text, e.start[x as usize] as usize, c, es, l))
-                                {
-                                    break x;
-                                }
-                                s = (s + 1) & (TB - 1);
-                            };
-                            if v < LAT_ESC as u64 && id < 2047 {
-                                unsafe {
-                                    *rows.region(hour, k).add(n[hour]) =
-                                        id << 21 | (five as u32) << 20 | v as u32
-                                };
-                                n[hour] += 1;
-                            } else {
-                                side[hour].push((id as u64) << 33 | v << 1 | five as u64);
+                            if blk + 64 > hi {
+                                m &= (1u64 << (hi - blk)) - 1;
                             }
+                            while m != 0 {
+                                let lf = blk + m.trailing_zeros() as usize;
+                                m &= m - 1;
+                                let j = start;
+                                start = lf + 1;
+                                let c = b;
+                                // 2026-MM-DDTHH: day offset from Oct 30, then the hour
+                                let ts = ld8(c, j + 5); // "MM-DDTHH" at +5 .. +12, little endian
+                                let m1 = (ts >> 8) as u8; // second month digit: '0' for Oct (10), '1' for Nov (11)
+                                let dd = (((ts >> 24) as u8 - b'0') * 10
+                                    + ((ts >> 32) as u8 - b'0'))
+                                    as usize;
+                                let hh = (((ts >> 48) as u8 - b'0') * 10
+                                    + ((ts >> 56) as u8 - b'0'))
+                                    as usize;
+                                let day = if m1 == b'0' { dd - 30 } else { dd + 1 };
+                                let hour = day * 24 + hh - 18;
+                                let ml = unsafe {
+                                    *mlen.get_unchecked(
+                                        (c[j + 28] as usize) << 8 | c[j + 29] as usize,
+                                    )
+                                } as usize;
+                                let es = j + 29 + ml;
+                                // from the back: latency is at most 10 digits, so the space before it is in
+                                // the last 16 bytes, and the endpoint ends 4 bytes before that space
+                                let sm = sp16(c, lf - 16);
+                                let s4 = lf - 16 + (31 - sm.leading_zeros()) as usize;
+                                let ee = s4 - 4;
+                                let five = c[ee + 1] == b'5';
+                                let nd = lf - s4 - 1; // latency digits, 1 to 10
+                                let v = if nd <= 8 {
+                                    // the 8 bytes ending at the LF, junk bytes in front masked off, then SWAR
+                                    let x = ld8(c, lf - 8)
+                                        & 0x0F0F0F0F0F0F0F0F
+                                        & (u64::MAX << (8 * (8 - nd)));
+                                    let x = (x * 10 + (x >> 8)) & 0x00FF00FF00FF00FF;
+                                    let x = (x * 100 + (x >> 16)) & 0x0000FFFF0000FFFF;
+                                    (x * 10000 + (x >> 32)) & 0xFFFFFFFF
+                                } else {
+                                    let mut v = 0u64;
+                                    for &d in &c[s4 + 1..lf] {
+                                        v = v * 10 + (d - b'0') as u64;
+                                    }
+                                    v
+                                };
+                                let l = ee - es;
+                                let (w0, w1) = if l >= 8 {
+                                    (ld8(c, es), ld8(c, ee - 8))
+                                } else {
+                                    (ld8(c, es) & ((1u64 << (8 * l)) - 1), 0)
+                                };
+                                let h = ((w0.wrapping_mul(0x9E3779B97F4A7C15)
+                                    ^ w1.wrapping_mul(0xC2B2AE3D27D4EB4F)
+                                    ^ (l as u64).wrapping_mul(0x165667B19E3779F9))
+                                    >> 50) as usize
+                                    & (TB - 1);
+                                let mut s = h;
+                                let id = loop {
+                                    let x = unsafe { *e.slot.get_unchecked(s) };
+                                    if x == u32::MAX {
+                                        let id = e.start.len() as u32;
+                                        // the text keeps 64 zero bytes at its end, so eq() can always read 64 bytes from a start
+                                        e.text.truncate(e.text.len() - 64);
+                                        e.slot[s] = id;
+                                        e.start.push(e.text.len() as u32);
+                                        e.len.push(l as u32);
+                                        e.text.extend_from_slice(&c[es..ee]);
+                                        e.text.extend_from_slice(&[0; 64]);
+                                        e.key.push((w0, w1, l as u32));
+                                        break id;
+                                    }
+                                    let k = unsafe { e.key.get_unchecked(x as usize) };
+                                    if k.0 == w0
+                                        && k.1 == w1
+                                        && k.2 == l as u32
+                                        && (l <= 16
+                                            || eq(&e.text, e.start[x as usize] as usize, c, es, l))
+                                    {
+                                        break x;
+                                    }
+                                    s = (s + 1) & (TB - 1);
+                                };
+                                if v < LAT_ESC as u64 && id < 2047 && n[hour] < rows.cap {
+                                    unsafe {
+                                        *rows.region(hour, k).add(n[hour]) =
+                                            id << 21 | (five as u32) << 20 | v as u32
+                                    };
+                                    n[hour] += 1;
+                                } else {
+                                    side[hour].push((id as u64) << 33 | v << 1 | five as u64);
+                                }
+                            }
+                            blk += 64;
                         }
-                        blk += 64;
+                        // drop this piece's page table entries now, on this thread, rather than all of
+                        // them at exit on one; the text is never read again. madvise, unlike munmap, does
+                        // not lock out the other threads' page faults. The piece before may read a few
+                        // bytes past its end, so a margin stays mapped at the front.
+                        release(&b[(lo + 256).min(hi)..hi]);
                     }
-                    // drop this share's page table entries now, on this thread, rather than all of
-                    // them at exit on one; the text is never read again. madvise, unlike munmap, does
-                    // not lock out the other threads' page faults. The thread before may read a few
-                    // bytes past its end, so a margin stays mapped at the front.
-                    release(&b[(lo + 256).min(hi)..hi]);
                     (e, n, side)
                 })
             })
