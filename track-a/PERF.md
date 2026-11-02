@@ -146,3 +146,7 @@ Round 33's fixed shares back, to compare with round 35 on runs of the same hour.
 
 ## Round 37: round 35 back (board A/B)
 Round 35's pieces again, for the second half of the comparison.
+Board, same hour: round 35 run-8cd5711c31f9 and run-83471b718955 at 0.0263 s (with the earlier 0.0262, 0.0294 and 0.0263 s), round 33 run-edee4feac35a 0.0274 s and, just before, 0.0263 and 0.0259 s. No difference that the noise does not cover, and round 35 costs 11 more counted lines on the board's count and 0.2-0.4 MB.
+
+## Round 38: round 35 out
+Round 33's fixed shares stay. Exact on s7, s42, t5, full, h99, h3.
