@@ -289,7 +289,7 @@ fn main() {
     let nall = nterm;
     let Tab {
         keys,
-        mut vals,
+        vals,
         mut long,
         ..
     } = tab;
@@ -401,11 +401,13 @@ fn main() {
     for (i, &t) in order.iter().enumerate() {
         new[t as usize] = i as u32;
     }
-    for j in 0..cap {
-        if keys[j] != 0 {
-            vals[j] = new[vals[j] as usize];
-        }
-    }
+    // the terms with their new ids, out of the word table in one pass
+    let terms: Vec<(u128, u32)> = keys
+        .iter()
+        .zip(&vals)
+        .filter(|e| *e.0 != 0)
+        .map(|(&k, &v)| (k, new[v as usize]))
+        .collect();
     for v in long.values_mut() {
         *v = new[*v as usize];
     }
@@ -415,8 +417,9 @@ fn main() {
     for t in pt.iter_mut() {
         *t = new[*t as usize];
     }
-    // qr and the renumbering's tables are done with here; they leave before the scan's peak
-    drop((c, order, new));
+    // qr, the word table and the renumbering's tables are done with here; they leave before the
+    // scan's peak
+    drop((c, order, new, keys, vals));
     let qs: Vec<Q> = qr
         .into_iter()
         .map(|(b, a, e)| {
@@ -430,19 +433,9 @@ fn main() {
     let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
     // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
     // slot holds the whole token and its value and a lookup is one access
-    let short = Probe::<2>::new(
-        keys.iter()
-            .zip(&vals)
-            .filter(|e| *e.0 != 0 && *e.0 >> 64 == 0)
-            .map(|(&k, &v)| (k, v)),
-    );
-    let longer = Probe::<4>::new(
-        keys.iter()
-            .zip(&vals)
-            .filter(|e| *e.0 >> 64 != 0)
-            .map(|(&k, &v)| (k, v)),
-    );
-    drop((keys, vals));
+    let short = Probe::<2>::new(terms.iter().filter(|e| e.0 >> 64 == 0).copied());
+    let longer = Probe::<4>::new(terms.iter().filter(|e| e.0 >> 64 != 0).copied());
+    drop(terms);
     let scan: Vec<Vec<_>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
             .map(|k| {
