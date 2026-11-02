@@ -158,3 +158,6 @@ Board: run-f5945ee12842 0.0445 s, run-bd7ab0bd6b6d 0.0397 s, run-b81f120fe75b 0.
 ## Round 33: round 32 out
 Back to round 26 (the main thread counts the names). Exact on s7, s42, t5, full, h99, h3.
 
+## Round 34: the region lookup in 0.4 MB instead of 0.65 MB
+After the seen word, the record loop's next hottest load is the country of the record's region, through two tables: the bitset of region ids, each 64-bit word paired with the count of ids before it (16 bytes a pair with padding, 250 KB), and the countries in id order as u16 ranks (400 KB). A rank fits a byte (240 countries, plus `_UNMATCHED`; an assert says so), and the words and their counts go in two arrays: 125 + 62 + 200 KB. On the board two threads share each core's L2 with the name table and the seen bits, so a smaller lookup misses less. Four sets of 31-41 alternating runs: -5.2%, +0.7% and -6.8% (CPU -7%) at 4 threads, -3.0% with 12 forced. Peak 7 MB as before. 1 more counted line. Exact on s7, s42, t5, full, h99, h3, the fresh full-scale seed 77, and with 1, 3, 5, 7, 12 and 16 threads.
+

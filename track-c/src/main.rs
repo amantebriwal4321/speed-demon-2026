@@ -108,21 +108,21 @@ fn main() {
     // popcount in 0.6 MB that stays in cache.
     let r = map(&format!("{data}/regions.csv"));
     let mut i = r.iter().position(|&c| c == b'\n').unwrap() + 1;
-    let (mut ids, mut country): (Vec<(u64, u32)>, Vec<u16>) = (Vec::new(), Vec::new()); // code here, rank below
+    let (mut ids, mut country): (Vec<u64>, Vec<u16>) = (Vec::new(), Vec::new());
     while i < r.len() {
         let id = dig(r, &mut i) as usize;
         let c = &r[i + 1..i + 4];
         if ids.len() <= id / 64 {
-            ids.resize(id / 64 + 1, (0, 0));
+            ids.resize(id / 64 + 1, 0);
         }
-        ids[id / 64].0 |= 1 << (id % 64);
+        ids[id / 64] |= 1 << (id % 64);
         country.push((c[0] - b'A') as u16 * 676 + (c[1] - b'A') as u16 * 26 + (c[2] - b'A') as u16);
         i += 5;
     }
-    let mut before = 0;
-    for w in ids.iter_mut() {
-        w.1 = before;
-        before += w.0.count_ones();
+    // the count of ids before each word
+    let mut before = vec![0u32; ids.len()];
+    for k in 1..ids.len() {
+        before[k] = before[k - 1] + ids[k - 1].count_ones();
     }
     let mut rank = vec![u16::MAX; 17576];
     for &c in &country {
@@ -140,12 +140,13 @@ fn main() {
         }
     }
     let unm = names.len() as u16;
-    for c in country.iter_mut() {
-        *c = rank[*c as usize];
-    }
+    // a country's rank fits a byte (there are 240 countries), so the lookup's tables come to 0.4 MB
+    assert!(names.len() < 256);
+    let country: Vec<u8> = country.iter().map(|&c| rank[c as usize] as u8).collect();
     let lookup = |rid: usize| match ids.get(rid / 64) {
-        Some(&(w, before)) if w >> (rid % 64) & 1 == 1 => {
-            country[(before + (w & ((1 << (rid % 64)) - 1)).count_ones()) as usize]
+        Some(&w) if w >> (rid % 64) & 1 == 1 => {
+            let k = before[rid / 64] + (w & ((1 << (rid % 64)) - 1)).count_ones();
+            country[k as usize] as u16
         }
         _ => unm,
     };
