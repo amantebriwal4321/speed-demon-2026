@@ -291,9 +291,7 @@ fn main() {
     for (r, &g) in order.iter().enumerate() {
         rank[g as usize] = r as u32;
     }
-    drop((slot, first));
-    // the threads' tables are freed by the hour threads, one each, instead of all here
-    let eps = std::sync::Mutex::new(eps);
+    drop((eps, slot, first));
     for m in maps.iter_mut() {
         for g in m.iter_mut() {
             *g = rank[*g as usize];
@@ -321,7 +319,6 @@ fn main() {
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
-                drop(eps.lock().unwrap().pop());
                 let mut cnt = vec![0u32; ne + 1];
                 let mut buf: Vec<u32> = Vec::new();
                 let mut errv = vec![0u64; ne];

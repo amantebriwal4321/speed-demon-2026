@@ -157,4 +157,8 @@ Between the parse and the hours, one thread merges the twelve threads' endpoint 
 - a key of up to 16 bytes holds every byte of the name (the first and last 8 bytes and the length), so the merge compares the text only for longer names, as the parse already does: table build 1.1 -> 0.8 ms;
 - the threads' tables are freed by the hour threads, one each, as they start, instead of all of them on the main thread.
 31 alternating runs: +1.2% at 4 threads, -1.9% with 12 forced, both within the noise. 4 more counted lines. Exact on s7, s42, t5, full, h99, h3, the fresh full-scale seed 77, and with 1, 3, 5, 7, 12 and 16 threads.
+Board: run-5e99a836a4d8 0.0344 s (C, unchanged, ran slow in the same run too) and run-fadadb85e36c 0.0416 s, where B, C and D ran at their usual times. Round 33's runs are 0.0257-0.0265 s on a quiet box.
+
+## Round 40: the threads' tables freed on the main thread again
+The likely cost in round 39: each table freed is a few unmaps, and an unmap interrupts every core the process runs on; on the main thread before the hours the other threads are idle, but from the hour threads it lands on the others while they work. That part goes back; the merge's skipped compares for keys of up to 16 bytes stay. Exact on s7, s42, t5, full, h99, h3.
 
