@@ -153,4 +153,8 @@ perf with the data cached puts the hottest stalls on three loads: the seen word 
 Timers around the steps outside the record loop: the region table takes 2.4 ms and counting each country's distinct names (a popcount over the 3.9 MB of seen bits) 0.6-0.8 ms, both on the main thread, against 124 ms for the records on 4 threads here; on the board, where the records take about a third of that, the two are several percent of the run. (Taking the record loop apart the same way: skipping the seen bits saves 12%, skipping the name table and the seen bits 32%; the loop's hottest loads are still the seen word, the region's country and the atomic OR.)
 The count now runs on the workers: once a worker has put in its last record it waits at a barrier for the others, then counts the names of its share of the countries. 21 alternating runs: -0.8% at 4 threads, -2.6% with 12 forced, both near the noise. 7 more counted lines. Exact on s7, s42, t5, full, h99, h3, the fresh full-scale seed 77, and with 1, 2, 3, 5, 7, 12 and 16 threads.
 Not kept: the region vectors sized up front (2.8 -> 2.5 ms, within the noise; round 29 already found the regions on all threads no faster on the board).
+Board: run-f5945ee12842 0.0445 s, run-bd7ab0bd6b6d 0.0397 s, run-b81f120fe75b 0.0393 s (10.1 MB), run-4ebaaf3c29b7 0.0385 s (9.7 MB), against 0.0387-0.0395 s and 9.1-9.8 MB for round 26 in the runs before it: no gain to see, for 7 more lines.
+
+## Round 33: round 32 out
+Back to round 26 (the main thread counts the names). Exact on s7, s42, t5, full, h99, h3.
 

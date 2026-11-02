@@ -183,16 +183,10 @@ fn main() {
     let words = SLOTS / 64;
     let seen: Vec<AtomicU64> = (0..ng * words).map(|_| AtomicU64::new(0)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let (all_in, distinct) = (
-        std::sync::Barrier::new(nt),
-        (0..ng).map(|_| AtomicU64::new(0)),
-    );
-    let distinct: Vec<AtomicU64> = distinct.collect();
     let aggs: Vec<Vec<Agg>> = std::thread::scope(|sc| {
         let hs: Vec<_> = (0..nt)
-            .map(|k| {
+            .map(|_| {
                 let (lookup, table, seen, cuts, next) = (&lookup, &table, &seen, &cuts, &next);
-                let (all_in, distinct) = (&all_in, &distinct);
                 sc.spawn(move || {
                     let c = body;
                     let mut agg = vec![Agg::new(); ng];
@@ -271,15 +265,6 @@ fn main() {
                     if pg != usize::MAX {
                         insert(table, seen, pg, pme, pj);
                     }
-                    // once every record is in, each thread counts the names of its share of the countries
-                    all_in.wait();
-                    for g in k * ng / nt..(k + 1) * ng / nt {
-                        let bits = seen[g * words..(g + 1) * words].iter();
-                        distinct[g].store(
-                            bits.map(|w| w.load(Relaxed).count_ones() as u64).sum(),
-                            Relaxed,
-                        );
-                    }
                     agg
                 })
             })
@@ -300,6 +285,14 @@ fn main() {
             t.note_bytes += x.note_bytes;
         }
     }
+    let distinct: Vec<u64> = (0..ng)
+        .map(|g| {
+            seen[g * words..(g + 1) * words]
+                .iter()
+                .map(|w| w.load(Relaxed).count_ones() as u64)
+                .sum()
+        })
+        .collect();
 
     let money = |v: i64| {
         format!(
@@ -329,7 +322,7 @@ fn main() {
             money(t.sum),
             money(t.min),
             money(t.max),
-            distinct[g].load(Relaxed),
+            distinct[g],
             t.name_bytes,
             t.note_bytes
         )
