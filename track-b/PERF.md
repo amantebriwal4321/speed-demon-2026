@@ -254,3 +254,7 @@ Board: run-7a7e88468f9a 0.2494 s, 55.6 MB (66.94 points); run-f8baffe6d89b 0.254
 
 ## Round 50: round 49 out
 Back to round 45 (exact on s7, s42, t5, full, h99, h3).
+
+## Round 51: the scan's tokens found a window at a time
+Taking the scan apart at 4 threads (each part replaced by nothing in turn): of its 330 ms, finding the tokens and packing them was about 150 ms, the table lookups 100 ms and recording the postings 80 ms. Finding the tokens alone, in a standalone loop over the same file, took about 50 ms, and reading every byte of the mapped file 15 ms, so the walk itself was costing more than the data it reads. It went token by token through the window's bits, with a branch for a token that ran past the window, one for a window with nothing left in it and one for the LF, each taken at random.
+Now each 64-byte window gives all its tokens at once: its token bits up to the doc's LF, a token's start where a token bit follows a separator, its end where a separator follows, and the k-th start pairs with the k-th end. A token that reaches the window's end is left for the next window, which starts where that token does; a run of 64 bytes or more (no query term is longer than 32) is skipped byte by byte. 15 alternating runs, twice: 571 -> 558 ms and 611 -> 552 ms, CPU 1892 -> 1809 and 1924 -> 1844 ms (-4%). 2 fewer counted lines. Exact on s7, s42, t5, full, h99, h3, the fresh full-scale seed 77, with 1, 3, 5, 7 and 12 threads, and against the Python reference on a small set with runs of 64 to 130 letters.

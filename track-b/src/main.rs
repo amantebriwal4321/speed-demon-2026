@@ -541,61 +541,62 @@ fn main() {
                             _ => p.3,
                         };
                         let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
-                        // token and LF bitmasks of a 64 byte window, then walk the bits
-                        let mut o = 64; // offset inside the current window, 64 = need a new one
-                        let (mut tm, mut nm) = (0u64, 0u64);
+                        // a 64 byte window at a time: the token bits up to the first LF, and every
+                        // token's start and end bit at once. A token that reaches the window's end
+                        // is left for the next window, which starts where it does.
+                        let mut ws = base + i;
                         loop {
-                            if o >= 64 {
-                                (tm, nm) = masks(docs, base + i);
-                                o = 0;
+                            let (t, n) = masks(docs, ws);
+                            let lf = n.trailing_zeros() as usize; // 64: the doc goes on
+                            let mut t = if lf == 64 { t } else { t & ((1 << lf) - 1) };
+                            let mut next = ws + 64;
+                            if t >> 63 == 1 {
+                                let p = 64 - t.leading_ones() as usize;
+                                if p == 0 {
+                                    // a run of 64 bytes or more is no query term: skip it
+                                    while lower[docs[ws] as usize] != 0 {
+                                        ws += 1;
+                                    }
+                                    continue;
+                                }
+                                t &= (1 << p) - 1;
+                                next = ws + p;
                             }
-                            let bits = (tm | nm) >> o;
-                            if bits == 0 {
-                                i += 64 - o;
-                                o = 64;
-                                continue;
-                            }
-                            let z = bits.trailing_zeros() as usize;
-                            i += z;
-                            o += z;
-                            if nm >> o & 1 == 1 {
+                            let (mut st, mut en) = (t & !(t << 1), t & !(t >> 1));
+                            while st != 0 {
+                                let s = ws + st.trailing_zeros() as usize;
+                                let l = ws + en.trailing_zeros() as usize + 1 - s;
+                                (st, en) = (st & (st - 1), en & (en - 1));
+                                // a short token's slot is prefetched and looked up one token later, so the
+                                // table miss overlaps the scan of the next token
+                                let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
+                                    let k = pack(&docs[s..], l);
+                                    (1, k, short.at(k), None)
+                                } else if l <= 16 {
+                                    let k = pack(&docs[s..], l);
+                                    (3, k, longer.at(k), None)
+                                } else if l <= 32 {
+                                    let mut w = [0u8; 32];
+                                    for (a, &b) in w.iter_mut().zip(&docs[s..s + l]) {
+                                        *a = lower[b as usize];
+                                    }
+                                    (2, 0, 0, long.get(&w[..l]).copied())
+                                } else {
+                                    (2, 0, 0, None)
+                                };
                                 if pend.0 != 0 {
                                     handle!(lookup(pend));
                                 }
+                                pend = nx;
+                            }
+                            if lf < 64 {
+                                i = ws + lf - base;
                                 break;
                             }
-                            let s = i;
-                            let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
-                            i += run;
-                            o += run;
-                            if o >= 64 {
-                                while lower[c[i] as usize] != 0 {
-                                    i += 1;
-                                }
-                                o = 64;
-                            }
-                            let l = i - s;
-                            // a short token's slot is prefetched and looked up one token later, so the
-                            // table miss overlaps the scan of the next token
-                            let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
-                                let k = pack(&docs[base + s..], l);
-                                (1, k, short.at(k), None)
-                            } else if l <= 16 {
-                                let k = pack(&docs[base + s..], l);
-                                (3, k, longer.at(k), None)
-                            } else if l <= 32 {
-                                let mut t = [0u8; 32];
-                                for (a, &b) in t.iter_mut().zip(&c[s..i]) {
-                                    *a = lower[b as usize];
-                                }
-                                (2, 0, 0, long.get(&t[..l]).copied())
-                            } else {
-                                (2, 0, 0, None)
-                            };
-                            if pend.0 != 0 {
-                                handle!(lookup(pend));
-                            }
-                            pend = nx;
+                            ws = next;
+                        }
+                        if pend.0 != 0 {
+                            handle!(lookup(pend));
                         }
                         i += 1;
                     }
