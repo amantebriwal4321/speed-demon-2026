@@ -7,7 +7,7 @@ Board numbers (seed 1 full data, scoring box), first run vs best run of the curr
 | Track | Reference (s) | First board run | Best board run | Points |
 |---|---|---|---|---|
 | A Ingest | 32.05 | 0.172 s, 340 MB | 0.0257 s, 20.6 MB (run-bb9921cb6cae) | 51.06 to 80.79 |
-| B Index | 56.35 | 0.798 s, 989 MB | 0.2212 s, 66 MB (run-84d08843293a) | 46.13 to 67.46 |
+| B Index | 56.35 | 0.798 s, 989 MB | 0.2129 s, 66 MB (run-ccfdff783b09) | 46.13 to 67.79 |
 | C Join | 14.44 | 0.702 s, 517 MB | 0.0385 s, 9 MB (run-7e61367059c9) | 28.41 to 76.26 |
 | D Traverse | 72.69 | 1.647 s, 338 MB | 0.210 s, 87 MB (run-4b0234285e75) | 41.03 to 65.00 |
 
@@ -23,6 +23,12 @@ The last night went to different designs rather than tuning, judged on the board
 - B's phrase check starting where a recorded anchor first shows up: -6.5% locally, but 5 MB and 58 lines more, about +0.2 points on paper, so not tried on the board (round 48);
 - A's parse in pieces handed out as threads come free (what helped C): -7% with 12 threads forced locally, no difference on the board (round 35).
 All of them were exact on the checks below; what decided was the board, so the code that stays is the code with the most board evidence behind it.
+
+What did hold up on the morning of the last day was finding threads with nothing to do, in B, the weakest of the three tracks that count. Timing each piece of its scan showed the token walk costing more than reading the text, and the fill running in two waves of half the parts, so half the threads sat idle through it:
+- each 64-byte window now gives all its token starts and ends at once from two bit masks (round 51);
+- each part is filled by two threads, the second filling its half of every list backward from the list's end, so neither needs the other's counts and the waves keep their memory (rounds 53-54);
+- less is done on one thread before the scan starts (rounds 55-56).
+B went from 0.222-0.230 s on a quiet box to 0.213-0.218 s at the same 66 MB, 67.46 to 67.79 points.
 
 Every change was checked against the published sha256 on seed 1 over 5 runs, against the Python reference on sample data for seeds 7 and 42, on tiny data, and with 1, 3, 5 and 7 threads; the final versions of all four also match the reference on a full-scale data set generated with a fresh seed (77). Per track steps and reasoning are in each `track-*/PERF.md`.
 
