@@ -87,3 +87,4 @@ Every push to `speed-demon` is built and run once per track on the scoring box. 
 | 01:17 | 96339f3 | run-8cd5711c31f9 0.0263 s 21.1 MB 80.36 | run-82c3b5b09d72 0.2401 s 65.7 MB 66.59 | run-364c8ab266a0 0.0389 s 9.4 MB 76.04 | run-3945e84cf841 0.2165 s 88.6 MB 64.57 |
 | 01:19 | d0369d6 | run-83471b718955 0.0263 s 20.8 MB 80.41 | run-f456b3209ae6 0.2463 s 66.4 MB 66.26 | run-6368411e3441 0.0395 s 9.5 MB 75.83 | run-2096b93b0a0f 0.2161 s 86.5 MB 64.69 |
 | 01:27 | 62b32db | run-8e3eb4120e73 0.0264 s 21.0 MB 80.44 | run-33c76923b749 0.2409 s 66.4 MB 66.50 | run-f90711724c3a 0.0391 s 9.5 MB 75.94 | run-d7363b05d8d8 0.2255 s 86.8 MB 64.21 |
+| 01:32 | e66e932 | run-afa8748ad746 0.0261 s 20.7 MB 80.60 | run-03da56740003 0.2327 s 66.0 MB 66.91 | run-677cdcbdbf64 0.0389 s 9.3 MB 76.08 | run-d18098e43234 0.2184 s 88.7 MB 64.46 |
