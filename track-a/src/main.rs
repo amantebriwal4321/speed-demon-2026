@@ -268,7 +268,10 @@ fn main() {
                             break n;
                         }
                         let (qi, y) = first[g as usize];
-                        if eps[qi].key[y] == e.key[x] && name(&eps[qi], y) == name(e, x) {
+                        // keys of up to 16 bytes hold every byte of the name
+                        if eps[qi].key[y] == e.key[x]
+                            && (e.key[x].2 <= 16 || name(&eps[qi], y) == name(e, x))
+                        {
                             break g;
                         }
                         s = (s + 1) & (cap - 1);
@@ -288,7 +291,9 @@ fn main() {
     for (r, &g) in order.iter().enumerate() {
         rank[g as usize] = r as u32;
     }
-    drop((eps, slot, first));
+    drop((slot, first));
+    // the threads' tables are freed by the hour threads, one each, instead of all here
+    let eps = std::sync::Mutex::new(eps);
     for m in maps.iter_mut() {
         for g in m.iter_mut() {
             *g = rank[*g as usize];
@@ -316,6 +321,7 @@ fn main() {
     std::thread::scope(|sc| {
         for _ in 0..nt {
             sc.spawn(|| {
+                drop(eps.lock().unwrap().pop());
                 let mut cnt = vec![0u32; ne + 1];
                 let mut buf: Vec<u32> = Vec::new();
                 let mut errv = vec![0u64; ne];

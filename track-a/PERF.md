@@ -151,3 +151,10 @@ Board, same hour: round 35 run-8cd5711c31f9 and run-83471b718955 at 0.0263 s (wi
 
 ## Round 38: round 35 out
 Round 33's fixed shares stay. Exact on s7, s42, t5, full, h99, h3.
+
+## Round 39: less of the merge on one thread
+Between the parse and the hours, one thread merges the twelve threads' endpoint tables while the others wait: timed with 12 threads forced, 1.1 ms to build the global table, 0.3-0.5 ms to free the threads' tables and 0.5 ms to sort and rank, about 2.2 ms in all, which on the board (A takes 26 ms there) would be several percent. Two parts of it go:
+- a key of up to 16 bytes holds every byte of the name (the first and last 8 bytes and the length), so the merge compares the text only for longer names, as the parse already does: table build 1.1 -> 0.8 ms;
+- the threads' tables are freed by the hour threads, one each, as they start, instead of all of them on the main thread.
+31 alternating runs: +1.2% at 4 threads, -1.9% with 12 forced, both within the noise. 4 more counted lines. Exact on s7, s42, t5, full, h99, h3, the fresh full-scale seed 77, and with 1, 3, 5, 7, 12 and 16 threads.
+

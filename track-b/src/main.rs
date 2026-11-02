@@ -155,9 +155,10 @@ struct Tab<'a> {
     long: HashMap<&'a [u8], u32>,
 }
 impl<'a> Tab<'a> {
-    // the table of `words`, and each word's id. Each word's slot is prefetched 16 words ahead,
-    // so the cache misses on a table this size overlap instead of coming one after another.
-    fn new(words: &[&'a [u8]]) -> (Self, Vec<u32>) {
+    // the table of `words` (slices of `qb`), and each word's id. Each word's slot is prefetched
+    // 16 words ahead, so the cache misses on a table this size overlap instead of coming one
+    // after another. A word is packed from all of `qb` after it, so pack reads 16 bytes at once.
+    fn new(words: &[&'a [u8]], qb: &[u8]) -> (Self, Vec<u32>) {
         let cap = (words.len() + 1).next_power_of_two().max(16);
         let mut t = Tab {
             keys: vec![0; cap],
@@ -166,7 +167,7 @@ impl<'a> Tab<'a> {
             long: HashMap::new(),
         };
         let home = |w: &[u8]| {
-            let k = pack(w, w.len());
+            let k = pack(&qb[w.as_ptr() as usize - qb.as_ptr() as usize..], w.len());
             (k, (hm(k) >> (64 - cap.trailing_zeros())) as usize)
         };
         let mut ring = [(0u128, 0usize); 16]; // the keys and home slots of the next 16 words
@@ -228,12 +229,13 @@ fn main() {
     // The queries, flat: a BOOL query is a range of (op, term) pairs in `ops`, a phrase a range
     // of terms in `pt` with its words in `pw`, so reading them allocates nothing per query.
     // A term is first its place in `words`, then its id once the table has seen every word.
-    // `words` gets its own mapping up front (over the mmap threshold), so it never sits in the heap
+    // Each gets room for a file of short queries up front, so none is copied as it grows (and
+    // `words` gets its own mapping, over the mmap threshold, so it never sits in the heap)
     let (mut words, mut ops, mut pt, mut qr) = (
         Vec::with_capacity(qb.len() / 4),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
+        Vec::with_capacity(qb.len() / 8),
+        Vec::with_capacity(qb.len() / 8),
+        Vec::with_capacity(qb.len() / 16),
     );
     let mut i = 0;
     while i < qb.len() {
@@ -274,7 +276,7 @@ fn main() {
         i += if qb[i] == b'"' { 2 } else { 1 }; // the closing quote and the LF
         qr.push((bool_q, a, if bool_q { ops.len() } else { pt.len() }));
     }
-    let (tab, ids) = Tab::new(&words);
+    let (tab, ids) = Tab::new(&words, qb);
     let pw: Vec<&[u8]> = pt.iter().map(|&x| words[x as usize]).collect();
     for e in ops.iter_mut() {
         e.1 = ids[e.1 as usize];
