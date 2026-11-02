@@ -16,8 +16,9 @@ fn add(cnt: &mut usize, sum: &mut u64, r: &mut Vec<u32>, x: &[u16], lo: u32) {
 // and under 2 MB, so a part-filled last block is not backed by a whole huge page
 const BLK: usize = 1 << 19;
 
+// one part's index: term t's docs (ids inside the part, ascending) are lists[loff[t]..loff[t + 1]],
+// and doc d's line has its TAB at doff[d]
 struct Part {
-    lo: u32,
     lists: Vec<u16>,
     loff: Vec<u32>,
     doff: Vec<u32>,
@@ -299,15 +300,6 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(16);
-    let mut cuts = vec![0usize];
-    for k in 1..nt {
-        let mut p = (docs.len() * k / nt).max(*cuts.last().unwrap());
-        while p < docs.len() && p > 0 && docs[p - 1] != b'\n' {
-            p += 1;
-        }
-        cuts.push(p);
-    }
-    cuts.push(docs.len());
     let mut lower = [0u8; 256]; // 0 = separator, else the lowercased byte
     for c in b'a'..=b'z' {
         lower[c as usize] = c;
@@ -335,7 +327,6 @@ fn main() {
         }
         v
     };
-    let nw = maxdoc / 64 + 1;
     let use_bits = maxdoc < 1 << 26 && docs.len() > 0;
     // a 256 KB sample of the docs counts each term's docs. Term ids are renumbered by that
     // count, most common first, so the counters the scan touches most sit together. The
@@ -425,7 +416,6 @@ fn main() {
             }
         })
         .collect();
-    let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * nw);
     // the scan's tables: tokens of 8 bytes or less in one, 9 to 16 bytes in the other, so a
     // slot holds the whole token and its value and a lookup is one access
     let short = Probe::<2>::new(
@@ -441,385 +431,374 @@ fn main() {
             .map(|(&k, &v)| (k, v)),
     );
     drop((keys, vals));
-    let scan: Vec<Vec<(Part, Vec<Vec<u16>>, Vec<u32>)>> = std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..nt)
-            .map(|k| {
-                let c = &docs[cuts[k]..cuts[k + 1]];
-                let base = cuts[k];
-                let (short, longer, long, lower, abits) = (&short, &longer, &long, &lower, &abits);
-                sc.spawn(move || {
-                    let mut p = Part {
-                        lo: u32::MAX,
-                        lists: Vec::new(),
-                        loff: Vec::new(),
-                        doff: Vec::new(),
-                    };
-                    // per term: the last doc that listed it and its list length so far, side by
-                    // side so a posting touches one cache line
-                    let mut lc = vec![[u16::MAX, 0]; nall];
-                    let counts = |lc: &mut Vec<[u16; 2]>| -> Vec<u32> {
-                        std::iter::once(0)
-                            .chain(
-                                lc.iter_mut()
-                                    .map(|e| std::mem::replace(e, [u16::MAX, 0])[1] as u32),
-                            )
-                            .collect()
-                    };
-                    let (mut blocks, mut blk) = (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
-                    let (mut acc, mut aw, mut fw) = (vec![0u64; nd], usize::MAX, 0);
-                    let mut i = 0;
-                    // lists hold doc ids local to their part as u16, so a part closes at 65,535 docs
-                    // (a doc count then fits in u16 too, and u16::MAX means "no doc yet")
-                    let mut done = Vec::new();
-                    while i < c.len() {
-                        let mut doc = 0u32;
-                        while c[i] != b'\t' {
-                            doc = doc * 10 + (c[i] - b'0') as u32;
-                            i += 1;
-                        }
-                        if p.doff.len() == 0xFFFF {
-                            blocks
-                                .push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
-                            let q = std::mem::replace(
-                                &mut p,
-                                Part {
-                                    lo: u32::MAX,
-                                    lists: Vec::new(),
-                                    loff: Vec::new(),
-                                    doff: Vec::new(),
-                                },
-                            );
-                            done.push((q, std::mem::take(&mut blocks), counts(&mut lc)));
-                        }
-                        if p.lo == u32::MAX {
-                            p.lo = doc;
-                        }
-                        // (doc, term) pairs go in blocks of whole docs, a MAX before each doc, so
-                        // the fill below can free each block as it goes and the peak stays low
-                        if blk.len() >= BLK {
-                            blocks
-                                .push(std::mem::replace(&mut blk, Vec::with_capacity(BLK + 4096)));
-                        }
-                        blk.push(u16::MAX);
-                        p.doff.push((base + i) as u32);
-                        let d = p.doff.len() as u32 - 1;
-                        // common terms gather 64 docs of bits locally, then each word goes out at once;
-                        // words between this thread's first and last hold only its docs, so a plain
-                        // store does, and only the first word (the last is below) needs an atomic OR
-                        let g = (p.lo + d) as usize >> 6;
-                        if g != aw {
-                            if aw == usize::MAX {
-                                fw = g;
+
+    // The docs are taken a part at a time, every thread on each part: the part is cut into one
+    // piece per thread, the pieces are scanned, their postings are sorted into the part's term
+    // lists, and every query is answered on the part before the next part starts. So only one
+    // part's postings are ever held. Doc ids inside a part are u16, and a part has about
+    // 50,000 docs.
+    let ndoc = if docs.is_empty() { 0 } else { maxdoc + 1 };
+    // the id of the doc whose line starts at byte x (ndoc at the end of the file)
+    let id_at = |x: usize| {
+        let s = docs[x..].iter().take_while(|&&c| c != b'\t');
+        let v = s.fold(0, |v, &c| v * 10 + (c - b'0') as usize);
+        if x == docs.len() {
+            ndoc
+        } else {
+            v
+        }
+    };
+    // docs[lo..hi] cut into n ranges of whole lines
+    let split = |lo: usize, hi: usize, n: usize| {
+        let mut cuts = vec![lo];
+        for k in 1..n {
+            let mut p = (lo + (hi - lo) * k / n).max(*cuts.last().unwrap());
+            while p > lo && p < hi && docs[p - 1] != b'\n' {
+                p += 1;
+            }
+            cuts.push(p);
+        }
+        cuts.push(hi);
+        cuts
+    };
+    let mut np = ndoc.div_ceil(50_000).max(1);
+    let pcuts = loop {
+        let c = split(0, docs.len(), np);
+        if c.windows(2).all(|w| id_at(w[1]) - id_at(w[0]) < 0xFFFF) {
+            break c;
+        }
+        np *= 2;
+    };
+    // each query's answer so far: count, sum, and the first ten ids in `first[..nf]`
+    #[derive(Clone, Copy, Default)]
+    struct Ans {
+        cnt: usize,
+        sum: u64,
+        first: [u32; 10],
+        nf: usize,
+    }
+    // queries are handed out RUN at a time, and a run's answers sit together
+    const RUN: usize = 64;
+    let ans: Vec<std::sync::Mutex<Vec<Ans>>> = (0..qs.len().div_ceil(RUN))
+        .map(|_| std::sync::Mutex::new(vec![Ans::default(); RUN]))
+        .collect();
+    for w in pcuts.windows(2) {
+        let first = id_at(w[0]) as u32;
+        let pw = (id_at(w[1]) - first as usize) / 64 + 1; // bitset words of the part
+        let cuts = split(w[0], w[1], nt);
+        let abits: Vec<std::sync::atomic::AtomicU64> = zeroed(nd * pw);
+        // each piece: its postings in blocks, its doc count of each term, where its docs start
+        let pieces: Vec<(Vec<Vec<u16>>, Vec<u32>, Vec<u32>)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..nt)
+                .map(|k| {
+                    let c = &docs[cuts[k]..cuts[k + 1]];
+                    let base = cuts[k];
+                    let (short, longer, long, lower, abits) =
+                        (&short, &longer, &long, &lower, &abits);
+                    sc.spawn(move || {
+                        // per term: the last doc that listed it and its doc count so far, side by
+                        // side so a posting touches one cache line
+                        let mut lc = vec![[u16::MAX, 0]; nall];
+                        let mut doff = Vec::new();
+                        let (mut blocks, mut blk) =
+                            (Vec::new(), Vec::<u16>::with_capacity(BLK + 4096));
+                        let (mut acc, mut aw, mut fw) = (vec![0u64; nd], usize::MAX, 0);
+                        let mut i = 0;
+                        while i < c.len() {
+                            let mut doc = 0u32;
+                            while c[i] != b'\t' {
+                                doc = doc * 10 + (c[i] - b'0') as u32;
+                                i += 1;
                             }
-                            for (x, a) in acc.iter_mut().enumerate().filter(|a| *a.1 != 0) {
-                                if aw == fw {
-                                    abits[x * nw + aw]
-                                        .fetch_or(std::mem::take(a), Ordering::Relaxed);
-                                } else {
-                                    abits[x * nw + aw].store(std::mem::take(a), Ordering::Relaxed);
+                            // (doc, term) pairs go in blocks of whole docs, a MAX before each doc,
+                            // so the fill can free each block as it goes
+                            if blk.len() >= BLK {
+                                blocks.push(std::mem::replace(
+                                    &mut blk,
+                                    Vec::with_capacity(BLK + 4096),
+                                ));
+                            }
+                            blk.push(u16::MAX);
+                            doff.push((base + i) as u32);
+                            let d = doc - first; // the doc's id in the part
+                                                 // common terms gather 64 docs of bits locally, then each word goes out
+                                                 // at once; words between this piece's first and last hold only its
+                                                 // docs, so a plain store does, and only the first word (the last is
+                                                 // below) needs an atomic OR
+                            let g = d as usize >> 6;
+                            if g != aw {
+                                if aw == usize::MAX {
+                                    fw = g;
                                 }
-                            }
-                            aw = g;
-                        }
-                        i += 1;
-                        macro_rules! handle {
-                            ($id:expr) => {{
-                                let id: Option<u32> = $id;
-                                if let Some(t) = id {
-                                    if (t as usize) < nd {
-                                        acc[t as usize] |= 1 << ((p.lo + d) & 63);
-                                    } else if lc[t as usize][0] != d as u16 {
-                                        lc[t as usize] = [d as u16, lc[t as usize][1] + 1];
-                                        put(&mut blk, t);
+                                for (x, a) in acc.iter_mut().enumerate().filter(|a| *a.1 != 0) {
+                                    if aw == fw {
+                                        abits[x * pw + aw]
+                                            .fetch_or(std::mem::take(a), Ordering::Relaxed);
+                                    } else {
+                                        abits[x * pw + aw]
+                                            .store(std::mem::take(a), Ordering::Relaxed);
                                     }
                                 }
-                            }};
-                        }
-                        let lookup = |p: (u8, u128, usize, Option<u32>)| match p.0 {
-                            1 => short.get(p.1, p.2),
-                            3 => longer.get(p.1, p.2),
-                            _ => p.3,
-                        };
-                        let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
-                        // token and LF bitmasks of a 64 byte window, then walk the bits
-                        let mut o = 64; // offset inside the current window, 64 = need a new one
-                        let (mut tm, mut nm) = (0u64, 0u64);
-                        loop {
-                            if o >= 64 {
-                                (tm, nm) = masks(docs, base + i);
-                                o = 0;
+                                aw = g;
                             }
-                            let bits = (tm | nm) >> o;
-                            if bits == 0 {
-                                i += 64 - o;
-                                o = 64;
-                                continue;
+                            i += 1;
+                            macro_rules! handle {
+                                ($id:expr) => {{
+                                    let id: Option<u32> = $id;
+                                    if let Some(t) = id {
+                                        if (t as usize) < nd {
+                                            acc[t as usize] |= 1 << (d & 63);
+                                        } else if lc[t as usize][0] != d as u16 {
+                                            lc[t as usize] = [d as u16, lc[t as usize][1] + 1];
+                                            put(&mut blk, t);
+                                        }
+                                    }
+                                }};
                             }
-                            let z = bits.trailing_zeros() as usize;
-                            i += z;
-                            o += z;
-                            if nm >> o & 1 == 1 {
+                            let lookup = |p: (u8, u128, usize, Option<u32>)| match p.0 {
+                                1 => short.get(p.1, p.2),
+                                3 => longer.get(p.1, p.2),
+                                _ => p.3,
+                            };
+                            let mut pend: (u8, u128, usize, Option<u32>) = (0, 0, 0, None);
+                            // token and LF bitmasks of a 64 byte window, then walk the bits
+                            let mut o = 64; // offset inside the current window, 64 = need a new one
+                            let (mut tm, mut nm) = (0u64, 0u64);
+                            loop {
+                                if o >= 64 {
+                                    (tm, nm) = masks(docs, base + i);
+                                    o = 0;
+                                }
+                                let bits = (tm | nm) >> o;
+                                if bits == 0 {
+                                    i += 64 - o;
+                                    o = 64;
+                                    continue;
+                                }
+                                let z = bits.trailing_zeros() as usize;
+                                i += z;
+                                o += z;
+                                if nm >> o & 1 == 1 {
+                                    if pend.0 != 0 {
+                                        handle!(lookup(pend));
+                                    }
+                                    break;
+                                }
+                                let s = i;
+                                let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
+                                i += run;
+                                o += run;
+                                if o >= 64 {
+                                    while lower[c[i] as usize] != 0 {
+                                        i += 1;
+                                    }
+                                    o = 64;
+                                }
+                                let l = i - s;
+                                // a short token's slot is prefetched and looked up one token
+                                // later, so the table miss overlaps the scan of the next token
+                                let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
+                                    let k = pack(&docs[base + s..], l);
+                                    (1, k, short.at(k), None)
+                                } else if l <= 16 {
+                                    let k = pack(&docs[base + s..], l);
+                                    (3, k, longer.at(k), None)
+                                } else if l <= 32 {
+                                    let mut t = [0u8; 32];
+                                    for (a, &b) in t.iter_mut().zip(&c[s..i]) {
+                                        *a = lower[b as usize];
+                                    }
+                                    (2, 0, 0, long.get(&t[..l]).copied())
+                                } else {
+                                    (2, 0, 0, None)
+                                };
                                 if pend.0 != 0 {
                                     handle!(lookup(pend));
                                 }
-                                break;
+                                pend = nx;
                             }
-                            let s = i;
-                            let run = (!(tm >> o)).trailing_zeros() as usize; // 64 when the run fills the window
-                            i += run;
-                            o += run;
-                            if o >= 64 {
-                                while lower[c[i] as usize] != 0 {
-                                    i += 1;
-                                }
-                                o = 64;
-                            }
-                            let l = i - s;
-                            // a short token's slot is prefetched and looked up one token later, so the
-                            // table miss overlaps the scan of the next token
-                            let nx: (u8, u128, usize, Option<u32>) = if l <= 8 {
-                                let k = pack(&docs[base + s..], l);
-                                (1, k, short.at(k), None)
-                            } else if l <= 16 {
-                                let k = pack(&docs[base + s..], l);
-                                (3, k, longer.at(k), None)
-                            } else if l <= 32 {
-                                let mut t = [0u8; 32];
-                                for (a, &b) in t.iter_mut().zip(&c[s..i]) {
-                                    *a = lower[b as usize];
-                                }
-                                (2, 0, 0, long.get(&t[..l]).copied())
-                            } else {
-                                (2, 0, 0, None)
-                            };
-                            if pend.0 != 0 {
-                                handle!(lookup(pend));
-                            }
-                            pend = nx;
+                            i += 1;
                         }
-                        i += 1;
-                    }
-                    for (x, a) in acc.iter_mut().enumerate() {
-                        if *a != 0 {
-                            abits[x * nw + aw].fetch_or(*a, Ordering::Relaxed);
-                        }
-                    }
-                    blocks.push(blk);
-                    done.push((p, blocks, counts(&mut lc)));
-                    done
-                })
-            })
-            .collect();
-        hs.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    drop((short, longer));
-    // the common terms are already in bitsets of all docs and get no list, which leaves out
-    // nearly half the postings
-    // the fill runs in two waves: a part's blocks and its lists are both alive while it fills,
-    // so filling half the parts at a time keeps half the lists off the peak
-    let mut todo: Vec<_> = scan.into_iter().flatten().collect();
-    let wave = todo.len().div_ceil(2);
-    let mut parts: Vec<Part> = Vec::new();
-    while !todo.is_empty() {
-        let now: Vec<_> = todo.drain(..wave.min(todo.len())).collect();
-        parts.extend(std::thread::scope(|sc| {
-            let hs: Vec<_> = now
-                .into_iter()
-                .map(|(mut p, blocks, mut cnt)| {
-                    sc.spawn(move || {
-                        for t in 0..nall {
-                            cnt[t + 1] += cnt[t];
-                        }
-                        let mut lists = vec![0u16; cnt[nall] as usize];
-                        let mut d = u16::MAX;
-                        for b in blocks {
-                            let mut q = 0;
-                            while q < b.len() {
-                                let mut t = b[q] as u32;
-                                q += 1;
-                                if t == 0xFFFF {
-                                    d = d.wrapping_add(1);
-                                    continue;
-                                }
-                                if t == 0xFFFE {
-                                    t = (b[q] as u32) << 16 | b[q + 1] as u32;
-                                    q += 2;
-                                }
-                                lists[cnt[t as usize] as usize] = d;
-                                cnt[t as usize] += 1;
+                        for (x, a) in acc.iter_mut().enumerate() {
+                            if *a != 0 {
+                                abits[x * pw + aw].fetch_or(*a, Ordering::Relaxed);
                             }
                         }
-                        // each start was moved to its term's end, the next term's start: shift back
-                        cnt.rotate_right(1);
-                        cnt[0] = 0;
-                        p.lists = lists;
-                        p.loff = cnt;
-                        p
+                        blocks.push(blk);
+                        (blocks, lc.iter().map(|e| e[1] as u32).collect(), doff)
                     })
                 })
                 .collect();
-            hs.into_iter()
-                .map(|h| h.join().unwrap())
-                .collect::<Vec<_>>()
-        }));
-    }
-    fn dl(p: &Part, t: u32) -> &[u16] {
-        &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize]
-    }
-
-    // BOOL queries over long lists run on a bitset of all docs: OR sets bits, NOT clears
-    // them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
-    let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
-    let tlen = |t: usize| {
-        if t < nd {
-            4 * nw
-        } else {
-            parts.iter().map(|p| dl(p, t as u32).len()).sum::<usize>()
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // the lists go by term, and inside a term by piece, so each list comes out ascending:
+        // each piece's counts become where its postings of each term go
+        let (mut blocks, mut offs, mut doff) = (Vec::new(), Vec::new(), Vec::new());
+        for (b, o, d) in pieces {
+            blocks.push(b);
+            offs.push(o);
+            doff.extend(d);
         }
-    };
-    let bs = |t: u32| {
-        let t = t as usize;
-        (t < nd).then(|| &bits[t * nw..(t + 1) * nw])
-    };
-    // queries are handed out RUN at a time, and a run's answers go into one buffer
-    const RUN: usize = 64;
-    let res: Vec<std::sync::OnceLock<Vec<u8>>> = (0..qs.len().div_ceil(RUN))
-        .map(|_| Default::default())
-        .collect();
-    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    std::thread::scope(|sc| {
-        for _ in 0..nt {
-            sc.spawn(|| {
-                let (mut acc, mut tmp) = (Vec::<u64>::new(), Vec::<u64>::new());
-                let (mut x, mut y) = (Vec::<u16>::new(), Vec::<u16>::new());
-                let mut r = Vec::with_capacity(10);
-                loop {
-                    let b = next.fetch_add(1, Ordering::Relaxed);
-                    if b * RUN >= qs.len() {
-                        break;
-                    }
-                    let mut o = Vec::new();
-                    for k in b * RUN..((b + 1) * RUN).min(qs.len()) {
-                        // parts cover disjoint, ascending doc ranges, so each query runs per part
-                        // and the per part answers just concatenate
-                        // only the count, the sum and the first ten ids are printed
-                        let (mut cnt, mut sum) = (0usize, 0u64);
-                        r.clear();
-                        let big = use_bits
-                            && match &qs[k] {
-                                Q::Bool(v) => {
-                                    v.iter().map(|&(_, t)| tlen(t as usize)).sum::<usize>() > 2 * nw
-                                }
-                                _ => false,
-                            };
-                        if big {
-                            if acc.is_empty() {
-                                acc = vec![0; nw];
-                                tmp = vec![0; nw];
+        let mut loff = vec![0u32; nall + 1];
+        let mut at = 0;
+        for t in 0..nall {
+            loff[t] = at;
+            for o in offs.iter_mut() {
+                (o[t], at) = (at, at + o[t]);
+            }
+        }
+        loff[nall] = at;
+        // every piece fills its own postings: the places they go never overlap
+        let mut lists = vec![0u16; at as usize];
+        struct Out(*mut u16);
+        unsafe impl Sync for Out {}
+        let out = Out(lists.as_mut_ptr());
+        std::thread::scope(|sc| {
+            for (k, (blocks, mut off)) in blocks.into_iter().zip(offs).enumerate() {
+                let out = &out;
+                let mut d = (id_at(cuts[k]) as u32).wrapping_sub(first + 1) as u16;
+                sc.spawn(move || {
+                    for b in blocks {
+                        let mut q = 0;
+                        while q < b.len() {
+                            let mut t = b[q] as u32;
+                            q += 1;
+                            if t == 0xFFFF {
+                                d = d.wrapping_add(1);
+                                continue;
                             }
-                            let Q::Bool(v) = &qs[k] else { unreachable!() };
-                            match bs(v[0].1) {
-                                Some(b) => acc.copy_from_slice(b),
-                                None => {
-                                    for p in &parts {
-                                        for d in dl(p, v[0].1).iter().map(|&x| p.lo + x as u32) {
+                            if t == 0xFFFE {
+                                t = (b[q] as u32) << 16 | b[q + 1] as u32;
+                                q += 2;
+                            }
+                            unsafe { *out.0.add(off[t as usize] as usize) = d };
+                            off[t as usize] += 1;
+                        }
+                    }
+                });
+            }
+        });
+        let p = Part { lists, loff, doff };
+        let p = &p;
+
+        // BOOL queries over long lists run on a bitset of the part's docs: OR sets bits, NOT
+        // clears them, AND keeps the list's docs whose bit is set. Ids come out ascending for free.
+        let bits: Vec<u64> = abits.into_iter().map(|a| a.into_inner()).collect();
+        let tlen = |t: usize| {
+            if t < nd {
+                4 * pw
+            } else {
+                dl(p, t as u32).len()
+            }
+        };
+        let bs = |t: u32| {
+            let t = t as usize;
+            (t < nd).then(|| &bits[t * pw..(t + 1) * pw])
+        };
+        let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|sc| {
+            for _ in 0..nt {
+                sc.spawn(|| {
+                    let (mut acc, mut tmp) = (vec![0u64; pw], vec![0u64; pw]);
+                    let (mut x, mut y) = (Vec::<u16>::new(), Vec::<u16>::new());
+                    let mut r = Vec::with_capacity(10);
+                    loop {
+                        let b = next.fetch_add(1, Ordering::Relaxed);
+                        if b * RUN >= qs.len() {
+                            break;
+                        }
+                        let mut a = ans[b].lock().unwrap();
+                        for k in b * RUN..((b + 1) * RUN).min(qs.len()) {
+                            // only the count, the sum and the first ten ids are printed
+                            let (mut cnt, mut sum) = (0usize, 0u64);
+                            r.clear();
+                            let big = use_bits
+                                && match &qs[k] {
+                                    Q::Bool(v) => {
+                                        v.iter().map(|&(_, t)| tlen(t as usize)).sum::<usize>()
+                                            > 2 * pw
+                                    }
+                                    _ => false,
+                                };
+                            match &qs[k] {
+                                Q::Bool(v) if big => {
+                                    let set = |acc: &mut [u64], t: u32| {
+                                        for &d in dl(p, t) {
                                             acc[d as usize >> 6] |= 1 << (d & 63);
                                         }
+                                    };
+                                    match bs(v[0].1) {
+                                        Some(b) => acc.copy_from_slice(b),
+                                        None => set(&mut acc, v[0].1),
                                     }
-                                }
-                            }
-                            for &(op, t) in &v[1..] {
-                                if let Some(b) = bs(t) {
-                                    match op {
-                                        1 => {
-                                            for (a, &x) in acc.iter_mut().zip(b) {
-                                                *a &= x
+                                    for &(op, t) in &v[1..] {
+                                        if let Some(b) = bs(t) {
+                                            match op {
+                                                1 => {
+                                                    for (a, &x) in acc.iter_mut().zip(b) {
+                                                        *a &= x
+                                                    }
+                                                }
+                                                2 => {
+                                                    for (a, &x) in acc.iter_mut().zip(b) {
+                                                        *a |= x
+                                                    }
+                                                }
+                                                _ => {
+                                                    for (a, &x) in acc.iter_mut().zip(b) {
+                                                        *a &= !x
+                                                    }
+                                                }
                                             }
+                                            continue;
                                         }
-                                        2 => {
-                                            for (a, &x) in acc.iter_mut().zip(b) {
-                                                *a |= x
+                                        match op {
+                                            1 => {
+                                                for &d in dl(p, t) {
+                                                    if acc[d as usize >> 6] >> (d & 63) & 1 == 1 {
+                                                        tmp[d as usize >> 6] |= 1 << (d & 63);
+                                                    }
+                                                }
+                                                std::mem::swap(&mut acc, &mut tmp);
+                                                tmp.fill(0);
                                             }
-                                        }
-                                        _ => {
-                                            for (a, &x) in acc.iter_mut().zip(b) {
-                                                *a &= !x
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-                                match op {
-                                    1 => {
-                                        for p in &parts {
-                                            for d in dl(p, t).iter().map(|&x| p.lo + x as u32) {
-                                                if acc[d as usize >> 6] >> (d & 63) & 1 == 1 {
-                                                    tmp[d as usize >> 6] |= 1 << (d & 63);
+                                            2 => set(&mut acc, t),
+                                            _ => {
+                                                for &d in dl(p, t) {
+                                                    acc[d as usize >> 6] &= !(1 << (d & 63));
                                                 }
                                             }
                                         }
-                                        std::mem::swap(&mut acc, &mut tmp);
-                                        tmp.fill(0);
                                     }
-                                    2 => {
-                                        for p in &parts {
-                                            for d in dl(p, t).iter().map(|&x| p.lo + x as u32) {
-                                                acc[d as usize >> 6] |= 1 << (d & 63);
-                                            }
+                                    // count and sum word by word: bit k of a position is set on the
+                                    // positions in mask k, so the positions of a word sum to the
+                                    // popcounts under the masks shifted by k; only the first ten
+                                    // ids are pulled out one by one
+                                    const M: [u64; 6] = [
+                                        0xAAAA_AAAA_AAAA_AAAA,
+                                        0xCCCC_CCCC_CCCC_CCCC,
+                                        0xF0F0_F0F0_F0F0_F0F0,
+                                        0xFF00_FF00_FF00_FF00,
+                                        0xFFFF_0000_FFFF_0000,
+                                        0xFFFF_FFFF_0000_0000,
+                                    ];
+                                    for w in 0..pw {
+                                        let mut b = std::mem::take(&mut acc[w]);
+                                        if b == 0 {
+                                            continue;
+                                        }
+                                        cnt += b.count_ones() as usize;
+                                        sum += (b.count_ones() as usize * w * 64) as u64
+                                            + (0..6)
+                                                .map(|k| ((b & M[k]).count_ones() as u64) << k)
+                                                .sum::<u64>();
+                                        while b != 0 && r.len() < 10 {
+                                            r.push(first + (w * 64) as u32 + b.trailing_zeros());
+                                            b &= b - 1;
                                         }
                                     }
-                                    _ => {
-                                        for p in &parts {
-                                            for d in dl(p, t).iter().map(|&x| p.lo + x as u32) {
-                                                acc[d as usize >> 6] &= !(1 << (d & 63));
-                                            }
-                                        }
-                                    }
+                                    sum += cnt as u64 * first as u64;
                                 }
-                            }
-                            // count and sum word by word: bit k of a position is set on the positions
-                            // in mask k, so the positions of a word sum to the popcounts under the masks
-                            // shifted by k; only the first ten ids are pulled out one by one
-                            const M: [u64; 6] = [
-                                0xAAAA_AAAA_AAAA_AAAA,
-                                0xCCCC_CCCC_CCCC_CCCC,
-                                0xF0F0_F0F0_F0F0_F0F0,
-                                0xFF00_FF00_FF00_FF00,
-                                0xFFFF_0000_FFFF_0000,
-                                0xFFFF_FFFF_0000_0000,
-                            ];
-                            for w in 0..nw {
-                                let mut b = std::mem::take(&mut acc[w]);
-                                if b == 0 {
-                                    continue;
-                                }
-                                cnt += b.count_ones() as usize;
-                                sum += (b.count_ones() as usize * w * 64) as u64
-                                    + (0..6)
-                                        .map(|k| ((b & M[k]).count_ones() as u64) << k)
-                                        .sum::<u64>();
-                                while b != 0 && r.len() < 10 {
-                                    r.push((w * 64) as u32 + b.trailing_zeros());
-                                    b &= b - 1;
-                                }
-                            }
-                        }
-                        // a phrase's terms are sorted out once, not per part: the rarest word anchors the
-                        // text check, the common ones are tested on their bitsets, the rest are ANDed
-                        // shortest first
-                        let (mut anchor, mut dn, mut ld) = (0, Vec::new(), Vec::new());
-                        if let Q::Phrase(ts, ks) = &qs[k] {
-                            anchor = (0..ts.len())
-                                .min_by_key(|&m| (tlen(ts[m] as usize), usize::MAX - ks[m].len()))
-                                .unwrap();
-                            let mut order: Vec<u32> = ts.to_vec();
-                            order.sort_unstable();
-                            order.dedup();
-                            (dn, ld) = order.into_iter().partition(|&t| (t as usize) < nd);
-                            ld.sort_by_key(|&t| tlen(t as usize));
-                        }
-                        for p in parts.iter().filter(|_| !big) {
-                            match &qs[k] {
                                 Q::Bool(v) => {
                                     x.clear();
                                     x.extend_from_slice(dl(p, v[0].1));
@@ -831,25 +810,33 @@ fn main() {
                                         }
                                         std::mem::swap(&mut x, &mut y);
                                     }
-                                    add(&mut cnt, &mut sum, &mut r, &x, p.lo);
+                                    add(&mut cnt, &mut sum, &mut r, &x, first);
                                 }
                                 Q::Phrase(ts, ks) => {
+                                    // the rarest word anchors the text check, the common ones are
+                                    // tested on their bitsets, the rest are ANDed shortest first
+                                    let anchor = (0..ts.len())
+                                        .min_by_key(|&m| {
+                                            (tlen(ts[m] as usize), usize::MAX - ks[m].len())
+                                        })
+                                        .unwrap();
+                                    let mut order: Vec<u32> = ts.to_vec();
+                                    order.sort_unstable();
+                                    order.dedup();
+                                    let (dn, mut ld): (Vec<u32>, Vec<u32>) =
+                                        order.into_iter().partition(|&t| (t as usize) < nd);
+                                    ld.sort_by_key(|&t| tlen(t as usize));
                                     // docs holding every term, then the doc text decides
                                     let hit = &mut x;
                                     hit.clear();
+                                    let has = |d: u16, t: &u32| {
+                                        bs(*t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1
+                                    };
                                     match ld.first() {
                                         Some(&t0) => hit.extend_from_slice(dl(p, t0)),
                                         None => hit.extend(
-                                            (0..p.doff.len() as u32)
-                                                .filter(|&x| {
-                                                    let d = p.lo + x;
-                                                    dn.iter().all(|&t| {
-                                                        bs(t).unwrap()[d as usize >> 6] >> (d & 63)
-                                                            & 1
-                                                            == 1
-                                                    })
-                                                })
-                                                .map(|x| x as u16),
+                                            (0..p.doff.len() as u16)
+                                                .filter(|&d| dn.iter().all(|t| has(d, t))),
                                         ),
                                     }
                                     for &t in ld.iter().skip(1) {
@@ -860,12 +847,7 @@ fn main() {
                                         std::mem::swap(hit, &mut y);
                                     }
                                     if !ld.is_empty() {
-                                        hit.retain(|&x| {
-                                            let d = p.lo + x as u32;
-                                            dn.iter().all(|&t| {
-                                                bs(t).unwrap()[d as usize >> 6] >> (d & 63) & 1 == 1
-                                            })
-                                        });
+                                        hit.retain(|&d| dn.iter().all(|t| has(d, t)));
                                     }
                                     if ts.len() > 1 {
                                         hit.retain(|&d| {
@@ -878,33 +860,45 @@ fn main() {
                                             )
                                         });
                                     }
-                                    add(&mut cnt, &mut sum, &mut r, &hit, p.lo);
+                                    add(&mut cnt, &mut sum, &mut r, &hit, first);
                                 }
                             }
+                            // parts come in doc order, so a part's ids follow the earlier ones
+                            let e = &mut a[k - b * RUN];
+                            e.cnt += cnt;
+                            e.sum += sum;
+                            for &id in r.iter().take(10 - e.nf) {
+                                e.first[e.nf] = id;
+                                e.nf += 1;
+                            }
                         }
-                        write!(o, "{} {}", cnt, sum).unwrap();
-                        for x in r.iter().take(10) {
-                            write!(o, " {x}").unwrap();
-                        }
-                        o.push(b'\n');
                     }
-                    res[b].set(o).ok();
-                }
-                // with no queries left, this thread drops one share's page table entries, so the
-                // exit does not tear the whole mapping down on one thread. A query still running
-                // elsewhere that reads there just faults the page back in from the page cache.
-                let k = done.fetch_add(1, Ordering::Relaxed);
-                release(&docs[cuts[k]..cuts[k + 1]]);
-            });
-        }
-    });
+                    // with no queries left, this thread drops one piece's page table entries:
+                    // the part's text is not read again (a phrase check still running elsewhere
+                    // just faults its page back in from the page cache)
+                    let k = done.fetch_add(1, Ordering::Relaxed);
+                    release(&docs[cuts[k]..cuts[k + 1]]);
+                });
+            }
+        });
+    }
+    drop((short, longer));
     let mut o = Vec::new();
-    for r in &res {
-        o.extend_from_slice(r.get().unwrap());
+    let all = ans.into_iter().flat_map(|a| a.into_inner().unwrap());
+    for e in all.take(qs.len()) {
+        write!(o, "{} {}", e.cnt, e.sum).unwrap();
+        for x in &e.first[..e.nf] {
+            write!(o, " {x}").unwrap();
+        }
+        o.push(b'\n');
     }
     std::fs::create_dir_all(&out).ok();
     std::fs::write(format!("{out}/results.txt"), o).unwrap();
     std::process::exit(0);
+}
+
+fn dl(p: &Part, t: u32) -> &[u16] {
+    &p.lists[p.loff[t as usize] as usize..p.loff[t as usize + 1] as usize]
 }
 
 // open addressing on a packed token: W = 2 holds tokens of up to 8 bytes as [bytes, value],
